@@ -1,6 +1,10 @@
 // app/page.tsx
-function ProductList() {
-  const items = ["Apples", "Bananas", "Oranges"]
+async function getProducts() {
+  return ["Apples", "Bananas", "Oranges"]
+}
+
+async function ProductList() {
+  const items = await getProducts()
 
   return (
     <ul>
@@ -11,12 +15,16 @@ function ProductList() {
 
 import { Counter } from "../components/Counter.tsx"
 
-export default function Page() {
+export default async function Page() {
+  const productList = await ProductList()
+
   return (
     <div>
       <h1>BunFrame</h1>
-      <ProductList />
-      <Counter />
+      {productList}
+      <div id="counter-root">
+        <Counter />
+      </div>
     </div>
   )
 }

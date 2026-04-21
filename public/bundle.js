@@ -17135,27 +17135,8 @@ function Counter() {
   }, undefined, true, undefined, this);
 }
 
-// app/page.tsx
-var jsx_dev_runtime2 = __toESM(require_jsx_dev_runtime(), 1);
-function ProductList() {
-  const items = ["Apples", "Bananas", "Oranges"];
-  return /* @__PURE__ */ jsx_dev_runtime2.jsxDEV("ul", {
-    children: items.map((item) => /* @__PURE__ */ jsx_dev_runtime2.jsxDEV("li", {
-      children: item
-    }, item, false, undefined, this))
-  }, undefined, false, undefined, this);
-}
-function Page() {
-  return /* @__PURE__ */ jsx_dev_runtime2.jsxDEV("div", {
-    children: [
-      /* @__PURE__ */ jsx_dev_runtime2.jsxDEV("h1", {
-        children: "BunFrame"
-      }, undefined, false, undefined, this),
-      /* @__PURE__ */ jsx_dev_runtime2.jsxDEV(ProductList, {}, undefined, false, undefined, this),
-      /* @__PURE__ */ jsx_dev_runtime2.jsxDEV(Counter, {}, undefined, false, undefined, this)
-    ]
-  }, undefined, true, undefined, this);
-}
-
 // client.ts
-import_client.hydrateRoot(document.getElementById("root"), import_react2.createElement(Page));
+var counterRoot = document.getElementById("counter-root");
+if (counterRoot) {
+  import_client.hydrateRoot(counterRoot, import_react2.createElement(Counter));
+}

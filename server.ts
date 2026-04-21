@@ -1,5 +1,5 @@
 import { Elysia } from "elysia"
-import { renderToString } from "react-dom/server"
+import { renderToReadableStream } from "react-dom/server"
 import { createElement } from "react"
 import Page from "./app/page.tsx"
 
@@ -7,7 +7,10 @@ const shell = await Bun.file("./index.html").text()
 
 const app = new Elysia()
   .get("/", async () => {
-    const html = renderToString(createElement(Page))
+    const stream = await renderToReadableStream(createElement(Page))
+    await stream.allReady
+
+    const html = await new Response(stream).text()
     const fullPage = shell.replace("<!--SSR-->", html)
 
     return new Response(fullPage, {

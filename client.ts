@@ -1,8 +1,9 @@
 import { hydrateRoot } from "react-dom/client"
 import { createElement } from "react"
-import Page from "./app/page.tsx"
+import { Counter } from "./components/Counter.tsx"
 
-hydrateRoot(
-  document.getElementById("root")!,
-  createElement(Page)
-)
+const counterRoot = document.getElementById("counter-root")
+
+if (counterRoot) {
+  hydrateRoot(counterRoot, createElement(Counter))
+}
