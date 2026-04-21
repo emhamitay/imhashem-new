@@ -1,22 +1,10 @@
 import { Elysia } from "elysia"
-import { renderToReadableStream } from "react-dom/server"
-import { createElement } from "react"
-import Page from "./app/page.tsx"
+import { registerRoutes } from "./framework/router.ts"
 
 const shell = await Bun.file("./index.html").text()
+const app = await registerRoutes(new Elysia(), shell)
 
-const app = new Elysia()
-  .get("/", async () => {
-    const stream = await renderToReadableStream(createElement(Page))
-    await stream.allReady
-
-    const html = await new Response(stream).text()
-    const fullPage = shell.replace("<!--SSR-->", html)
-
-    return new Response(fullPage, {
-      headers: { "Content-Type": "text/html" }
-    })
-  })
+app
   .get("/bundle.js", () => {
     return new Response(Bun.file("./public/bundle.js"), {
       headers: { "Content-Type": "application/javascript" }
