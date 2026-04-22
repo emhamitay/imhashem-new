@@ -1,18 +1,20 @@
-import { Elysia } from "elysia"
-import { registerRoutes } from "./framework/router.ts"
-import { setupHMR } from "./framework/hmr.ts"
+import { createRoutes, SHELL_PATH } from "./framework/router.ts"
+import indexHtml from "./index.html"
 
-const shell = await Bun.file("./index.html").text()
-const app = await registerRoutes(new Elysia(), shell)
+const isDev = process.env.NODE_ENV === "development"
 
-app.get("/bundle.js", () => {
-  return new Response(Bun.file("./.bunframe/bundle.js"), {
-    headers: { "Content-Type": "application/javascript" }
-  })
+const pageRoutes = await createRoutes(isDev)
+
+const server = Bun.serve({
+  port: 3000,
+  routes: {
+    ...pageRoutes,
+    [SHELL_PATH]: indexHtml,
+  },
+  development: isDev && {
+    hmr: true,
+    console: true,
+  },
 })
 
-setupHMR(app)
-
-app.listen(3000)
-
-console.log("BunFrame running at http://localhost:3000")
+console.log(`BunFrame running at ${server.url}`)

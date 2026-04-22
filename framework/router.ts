@@ -1,42 +1,56 @@
-import { Elysia } from "elysia";
-import { renderToReadableStream } from "react-dom/server";
-import { createElement } from "react";
+import { renderToReadableStream } from "react-dom/server"
+import { createElement, type ComponentType } from "react"
+
+type RouteHandler = (req: Request) => Promise<Response>
+
+export const SHELL_PATH = "/__bunframe_shell__"
 
 function normalizeRoutePath(file: string) {
-  const normalizedFile = file.replace(/\\/g, "/").replace(/^\.\//, "");
-  const appRelativeFile = normalizedFile.replace(/^app\//, "").replace(/^\/+/, "");
+  const normalizedFile = file.replace(/\\/g, "/").replace(/^\.\//, "")
+  const appRelativeFile = normalizedFile.replace(/^app\//, "").replace(/^\/+/, "")
   const normalizedRoute = appRelativeFile
     .replace(/(?:^|\/)page\.tsx$/, "")
-    .replace(/^\/+|\/+$/g, "");
+    .replace(/^\/+|\/+$/g, "")
 
   return {
     normalizedFile: appRelativeFile,
     route: normalizedRoute === "" ? "/" : `/${normalizedRoute}`,
-  };
+  }
 }
 
-export async function registerRoutes(app: Elysia, shell: string) {
-  const glob = new Bun.Glob("**/page.tsx");
-  let routedApp = app;
+async function fetchShell(req: Request): Promise<string> {
+  const shellUrl = new URL(SHELL_PATH, req.url)
+  const response = await fetch(shellUrl)
+  return response.text()
+}
+
+export async function createRoutes(isDev: boolean) {
+  const glob = new Bun.Glob("**/page.tsx")
+  const routes: Record<string, RouteHandler> = {}
 
   for await (const file of glob.scan("./app")) {
-    const { normalizedFile, route } = normalizeRoutePath(file);
+    const { normalizedFile, route } = normalizeRoutePath(file)
 
-    const mod = await import(`../app/${normalizedFile}`);
-    const Page = mod.default;
+    routes[route] = async (req) => {
+      const suffix = isDev ? `?t=${Date.now()}` : ""
+      const mod = await import(`../app/${normalizedFile}${suffix}`)
+      const Page = mod.default as ComponentType
 
-    routedApp = routedApp.get(route, async () => {
-      const stream = await renderToReadableStream(createElement(Page));
-      await stream.allReady;
-      const html = await new Response(stream).text();
-      const fullPage = shell.replace("<!--SSR-->", html);
+      const [shell, stream] = await Promise.all([
+        fetchShell(req),
+        renderToReadableStream(createElement(Page)),
+      ])
+      await stream.allReady
+      const html = await new Response(stream).text()
+      const fullPage = shell.replace("<!--SSR-->", html)
+
       return new Response(fullPage, {
         headers: { "Content-Type": "text/html" },
-      });
-    });
+      })
+    }
 
-    console.log(`Registered route: ${route}`);
+    console.log(`Registered route: ${route}`)
   }
 
-  return routedApp;
+  return routes
 }
