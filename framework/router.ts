@@ -24,7 +24,7 @@ async function fetchShell(req: Request): Promise<string> {
   return response.text()
 }
 
-export async function createRoutes(isDev: boolean) {
+export async function createRoutes() {
   const glob = new Bun.Glob("**/page.tsx")
   const routes: Record<string, RouteHandler> = {}
 
@@ -32,8 +32,7 @@ export async function createRoutes(isDev: boolean) {
     const { normalizedFile, route } = normalizeRoutePath(file)
 
     routes[route] = async (req) => {
-      const suffix = isDev ? `?t=${Date.now()}` : ""
-      const mod = await import(`../app/${normalizedFile}${suffix}`)
+      const mod = await import(`../app/${normalizedFile}`)
       const Page = mod.default as ComponentType
 
       const [shell, stream] = await Promise.all([

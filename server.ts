@@ -3,7 +3,7 @@ import indexHtml from "./index.html"
 
 const isDev = process.env.NODE_ENV === "development"
 
-const pageRoutes = await createRoutes(isDev)
+const pageRoutes = await createRoutes()
 
 const server = Bun.serve({
   port: 3000,
