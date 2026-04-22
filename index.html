@@ -8,5 +8,16 @@
   <body>
     <div id="root"><!--SSR--></div>
     <script type="module" src="/bundle.js"></script>
+    <script>
+      (() => {
+        const socket = new WebSocket("ws://localhost:3000/hmr")
+        socket.addEventListener("open", () => console.log("HMR connected"))
+        socket.addEventListener("message", (event) => {
+          if (event.data === "reload") location.reload()
+        })
+        socket.addEventListener("error", (event) => console.error("HMR error", event))
+        socket.addEventListener("close", () => console.log("HMR disconnected"))
+      })()
+    </script>
   </body>
 </html>
