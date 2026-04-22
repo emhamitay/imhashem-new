@@ -5,6 +5,7 @@ const page: React.FC = () => {
   return (
     <>
     Welcome to the Login Page!
+    <p>Please enter your credentials to log in.</p>
     </>
   );
 };

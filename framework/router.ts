@@ -37,6 +37,50 @@ async function fetchShell(req: Request): Promise<string> {
   return response.text();
 }
 
+/*
+For "dashboard/settings/page.tsx" returns:
+["layout.tsx", "dashboard/layout.tsx", "dashboard/settings/layout.tsx"]
+*/
+function getLayoutPaths(normalizedFile: string): string[] {
+  const segments = normalizedFile
+    .replace(/\/?page\.tsx$/, "")
+    .split("/")
+    .filter(Boolean);
+
+  const paths = ["layout.tsx"];
+  for (let i = 0; i < segments.length; i++) {
+    paths.push([...segments.slice(0, i + 1), "layout.tsx"].join("/"));
+  }
+  return paths;
+}
+
+async function resolveLayouts(
+  normalizedFile: string
+): Promise<ComponentType<{ children: React.ReactNode }>[]> {
+  const layouts: ComponentType<{ children: React.ReactNode }>[] = [];
+
+  for (const layoutPath of getLayoutPaths(normalizedFile)) {
+    try {
+      const mod = await import(`${import.meta.dir}/../app/${layoutPath}`);
+      if (mod.default) layouts.push(mod.default);
+    } catch {
+      // no layout at this segment, skip
+    }
+  }
+
+  return layouts;
+}
+
+function wrapWithLayouts(
+  page: React.ReactNode,
+  layouts: ComponentType<{ children: React.ReactNode }>[]
+): React.ReactNode {
+  return layouts.reduceRight(
+    (children, Layout) => createElement(Layout, null, children),
+    page
+  );
+}
+
 export async function createRoutes() {
   const glob = new Bun.Glob("**/page.tsx");
   const routes: Record<string, RouteHandler> = {};
@@ -44,7 +88,6 @@ export async function createRoutes() {
   for await (const file of glob.scan(`${import.meta.dir}/../app`)) {
     const { normalizedFile, route } = normalizeRoutePath(file);
 
-    // inside createRoutes(), replace the route handler:
     routes[route] = async (req) => {
       const params = (req as any).params ?? {};
 
@@ -52,9 +95,12 @@ export async function createRoutes() {
         const mod = await import(`${import.meta.dir}/../app/${normalizedFile}`);
         const Page = mod.default as ComponentType;
 
+        const layouts = await resolveLayouts(normalizedFile);
+        const tree = wrapWithLayouts(createElement(Page), layouts);
+
         const [shell, stream] = await Promise.all([
           fetchShell(req),
-          renderToReadableStream(createElement(Page)),
+          renderToReadableStream(tree),
         ]);
         await stream.allReady;
         const html = await new Response(stream).text();
