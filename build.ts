@@ -1,6 +1,6 @@
 await Bun.build({
   entrypoints: ["./client.ts"],
-  outdir: "./public",
+  outdir: "./.bunframe",
   naming: "bundle.js",
   target: "browser",
 })

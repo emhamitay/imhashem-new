@@ -6,7 +6,7 @@ const shell = await Bun.file("./index.html").text()
 const app = await registerRoutes(new Elysia(), shell)
 
 app.get("/bundle.js", () => {
-  return new Response(Bun.file("./public/bundle.js"), {
+  return new Response(Bun.file("./.bunframe/bundle.js"), {
     headers: { "Content-Type": "application/javascript" }
   })
 })
