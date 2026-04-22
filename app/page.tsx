@@ -21,6 +21,7 @@ export default async function Page() {
   return (
     <div>
       <h1>BunFrame</h1>
+      <p>This is the home page.</p>
       {productList}
       <div id="counter-root">
         <Counter />
