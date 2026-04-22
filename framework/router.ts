@@ -1,6 +1,6 @@
 import { renderToReadableStream } from "react-dom/server";
 import { createElement, type ComponentType } from "react";
-import { runWithParams } from "./context.ts";
+import { RouteParamsProvider } from "./hooks.ts";
 
 type RouteHandler = (req: Request) => Promise<Response>;
 
@@ -55,7 +55,7 @@ function getLayoutPaths(normalizedFile: string): string[] {
 }
 
 async function resolveLayouts(
-  normalizedFile: string
+  normalizedFile: string,
 ): Promise<ComponentType<{ children: React.ReactNode }>[]> {
   const layouts: ComponentType<{ children: React.ReactNode }>[] = [];
 
@@ -73,11 +73,11 @@ async function resolveLayouts(
 
 function wrapWithLayouts(
   page: React.ReactNode,
-  layouts: ComponentType<{ children: React.ReactNode }>[]
+  layouts: ComponentType<{ children: React.ReactNode }>[],
 ): React.ReactNode {
   return layouts.reduceRight(
     (children, Layout) => createElement(Layout, null, children),
-    page
+    page,
   );
 }
 
@@ -91,24 +91,28 @@ export async function createRoutes() {
     routes[route] = async (req) => {
       const params = (req as any).params ?? {};
 
-      return runWithParams(params, async () => {
-        const mod = await import(`${import.meta.dir}/../app/${normalizedFile}`);
-        const Page = mod.default as ComponentType;
+      const mod = await import(`${import.meta.dir}/../app/${normalizedFile}`);
+      const Page = mod.default as ComponentType;
 
-        const layouts = await resolveLayouts(normalizedFile);
-        const tree = wrapWithLayouts(createElement(Page), layouts);
+      const layouts = await resolveLayouts(normalizedFile);
+      const pageTree = wrapWithLayouts(createElement(Page), layouts);
+      const tree = createElement(RouteParamsProvider, { params }, pageTree);
 
-        const [shell, stream] = await Promise.all([
-          fetchShell(req),
-          renderToReadableStream(tree),
-        ]);
-        await stream.allReady;
-        const html = await new Response(stream).text();
-        const fullPage = shell.replace("<!--SSR-->", html);
+      const [shell, stream] = await Promise.all([
+        fetchShell(req),
+        renderToReadableStream(tree),
+      ]);
+      await stream.allReady;
+      const html = await new Response(stream).text();
+      const fullPage = shell
+        .replace("<!--SSR-->", html)
+        .replace(
+          "</body>",
+          `<script>window.__PARAMS__=${JSON.stringify(params)}</script></body>`,
+        );
 
-        return new Response(fullPage, {
-          headers: { "Content-Type": "text/html" },
-        });
+      return new Response(fullPage, {
+        headers: { "Content-Type": "text/html" },
       });
     };
 
