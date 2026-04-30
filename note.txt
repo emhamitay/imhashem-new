@@ -1,0 +1,124 @@
+BunFrame RSC — design notes (v1)
+================================
+
+This pass added a working React Server Components pipeline. A few decisions
+were made under constraints worth recording so we know what to revisit and
+why.
+
+────────────────────────────────────────────────────────────────────────────
+1) Single process, --conditions react-server, NO server-side HTML pre-render
+────────────────────────────────────────────────────────────────────────────
+What we ship now:
+  - server.ts boots under `bun --conditions react-server`
+  - The router renders only the RSC payload (Pass 1)
+  - The HTML response is a small shell with the RSC payload embedded inline
+    in <script type="text/x-component" id="__BUNFRAME_RSC__">
+  - The browser reads that payload, deserializes it via
+    react-server-dom-webpack/client.browser, and mounts with createRoot()
+
+What we DON'T do yet:
+  - No HTML pre-render of the React tree on the server.
+
+Why: in a single Node/Bun process running under the `react-server` export
+condition, both `react-dom/server` and `react-dom/static` resolve to a stub
+that throws "not supported in React Server Components" (verified in
+node_modules/react-dom/server.react-server.js and static.react-server.js).
+React expects two runtimes: one for the RSC pass (server-only React, this
+condition) and one for the SSR pass (regular React, no condition). Doing
+both in one process needs either a worker_thread, a child process, or a VM
+context with separate module resolution. That's a sizable engineering
+project and was deliberately deferred.
+
+Tradeoff: First Contentful Paint is slightly worse — the browser sees an
+empty <div id="root"> until the inline RSC payload is parsed and rendered.
+For most pages the payload is in the same HTML response so the delay is
+small (no extra round trip).
+
+How to add it later:
+  - Spawn a worker on boot that imports React/react-dom/server WITHOUT the
+    react-server condition, plus the client manifest. Pipe the RSC stream to
+    the worker; it returns a stream of HTML.
+  - Or: spawn the worker per-request (slower start, simpler lifecycle).
+
+────────────────────────────────────────────────────────────────────────────
+2) Client-side navigation (?_rsc=1) — NOT in this pass
+────────────────────────────────────────────────────────────────────────────
+The current implementation only supports initial-load hydration. Each page
+navigation is a full document load.
+
+What's missing:
+  - A handler that returns ONLY the RSC payload (no HTML shell) when the
+    request asks for it (Accept: text/x-component or ?_rsc=1)
+  - Browser-side router that intercepts <a> clicks, fetches that endpoint,
+    pipes the response into createFromFetch(), and updates a top-level
+    React state holding the current rscPromise so React rerenders the tree
+    in-place
+
+Wire-up sketch for the next pass:
+  - router.ts: add a branch that, if `req.headers.get("Accept") ===
+    "text/x-component"` (or `_rsc=1`), responds with the raw RSC stream and
+    `Content-Type: text/x-component; charset=utf-8` — no HTML, no inline
+    payload, just the stream.
+  - client.ts: lift the rscPromise into useState. Add a navigate(href)
+    function that calls createFromFetch(...) and setRoot(nextPromise).
+    Hook into history.pushState + popstate.
+
+────────────────────────────────────────────────────────────────────────────
+3) "use server" / Server Functions — NOT in this pass
+────────────────────────────────────────────────────────────────────────────
+The directive scanner already detects "use server" and the plugin has a
+branch reserved for it. We did NOT implement the server-function transform
+(turning each export into a POST endpoint with stable IDs and a registry).
+
+Plan:
+  - Plugin: when isolating a "use server" file for the CLIENT build (which
+    we don't currently do — server-only files are simply not bundled for
+    the browser), emit a stub whose exports are fetch() calls to /__fn/<id>.
+  - Server: register a /__fn/:id handler that decodes args via
+    react-server-dom-webpack/server.edge#decodeReply, invokes the real
+    function, and encodes the result.
+  - Inline (function-level) "use server" inside server components needs the
+    same treatment but with auto-generated IDs.
+
+────────────────────────────────────────────────────────────────────────────
+4) HMR — NOT in this pass
+────────────────────────────────────────────────────────────────────────────
+`bun --watch` restarts the whole process on file change in dev. That's
+correct but slow. True RSC HMR has three moving parts (client-build chunk
+swap, RSC payload re-fetch, React state preservation) — out of scope here.
+
+────────────────────────────────────────────────────────────────────────────
+5) Files removed during this pass
+────────────────────────────────────────────────────────────────────────────
+  - app/(test)/api/[name]/{page,test}.tsx  (route-system experiments)
+  - app/[id]/[name]/page.tsx               (route-system experiments)
+  - index.html                             (router now generates the shell
+                                            inline; was previously served
+                                            via Bun's HTML import to inject
+                                            hashed script tags)
+
+────────────────────────────────────────────────────────────────────────────
+6) New layout
+────────────────────────────────────────────────────────────────────────────
+  framework/rsc/directives.ts    Directive scanner (skips //, /* */, BOM,
+                                 multiple "use strict"/etc. before
+                                 "use client"/"use server")
+  framework/rsc/manifest.ts      Shared client-manifest state + stub source
+                                 generator
+  framework/rsc/scan.ts          Walks app/ and components/ at startup to
+                                 find every "use client" file
+  framework/rsc/plugin.ts        Bun runtime plugin: replaces "use client"
+                                 modules with client-reference stubs at
+                                 import time. Uses Bun.Transpiler.scan() —
+                                 no regex.
+  framework/rsc/build-client.ts  Runs Bun.build() on (bootstrap + every
+                                 "use client" file), produces the manifest
+                                 the RSC renderer consumes.
+  framework/router.ts            Now renders only the RSC payload and
+                                 embeds it in an HTML shell.
+  client.ts                      Reads the inline RSC payload and mounts
+                                 via createRoot. Provides webpack-flavored
+                                 chunk-load/require shims that just use
+                                 dynamic import().
+  server.ts                      Boots: register plugin → scan → build
+                                 client → start serving.

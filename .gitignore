@@ -6,6 +6,7 @@ out
 dist
 *.tgz
 .imhashem
+.bunframe
 
 # code coverage
 coverage

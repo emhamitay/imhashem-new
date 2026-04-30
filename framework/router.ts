@@ -1,13 +1,23 @@
-import { renderToReadableStream } from "react-dom/server";
+import { renderToReadableStream } from "react-server-dom-webpack/server.edge";
 import { createElement, type ComponentType } from "react";
-import { RouteParamsProvider } from "./hooks.ts";
+import { getManifest } from "./rsc/manifest.ts";
+
+type PageProps = { params: Record<string, string> };
+type LayoutProps = { params: Record<string, string>; children: React.ReactNode };
 
 type RouteHandler = (req: Request) => Promise<Response>;
 
-export const SHELL_PATH = "/__bunframe_shell__";
+export type RouterConfig = {
+  bootstrapUrl: string;
+};
+
+let bootstrapUrl = "";
+export function setRouterConfig(cfg: RouterConfig): void {
+  bootstrapUrl = cfg.bootstrapUrl;
+}
 
 /*
-normalizeRoutePath - handles Windows paths, 
+normalizeRoutePath - handles Windows paths,
 strips app/ prefix, maps page.tsx to the right route
 */
 function normalizeRoutePath(file: string) {
@@ -25,16 +35,6 @@ function normalizeRoutePath(file: string) {
     normalizedFile: appRelativeFile,
     route: normalizedRoute === "" ? "/" : `/${normalizedRoute}`,
   };
-}
-
-/*
-fetchShell is clever — it fetches 
-/__bunframe_shell__ so Bun injects the correct hashed client script tag automatically
-*/
-async function fetchShell(req: Request): Promise<string> {
-  const shellUrl = new URL(SHELL_PATH, req.url);
-  const response = await fetch(shellUrl);
-  return response.text();
 }
 
 /*
@@ -56,9 +56,8 @@ function getLayoutPaths(normalizedFile: string): string[] {
 
 async function resolveLayouts(
   normalizedFile: string,
-): Promise<ComponentType<{ children: React.ReactNode }>[]> {
-  const layouts: ComponentType<{ children: React.ReactNode }>[] = [];
-
+): Promise<ComponentType<LayoutProps>[]> {
+  const layouts: ComponentType<LayoutProps>[] = [];
   for (const layoutPath of getLayoutPaths(normalizedFile)) {
     try {
       const mod = await import(`${import.meta.dir}/../app/${layoutPath}`);
@@ -67,18 +66,60 @@ async function resolveLayouts(
       // no layout at this segment, skip
     }
   }
-
   return layouts;
 }
 
 function wrapWithLayouts(
   page: React.ReactNode,
-  layouts: ComponentType<{ children: React.ReactNode }>[],
+  layouts: ComponentType<LayoutProps>[],
+  params: Record<string, string>,
 ): React.ReactNode {
   return layouts.reduceRight(
-    (children, Layout) => createElement(Layout, null, children),
+    (children, Layout) => createElement(Layout, { params }, children),
     page,
   );
+}
+
+/*
+HTML shell.
+
+The RSC payload is embedded as the body of a <script type="text/x-component">.
+Inside HTML, the only sequence the parser recognizes as ending a script is
+literally "</script" (case-insensitive). We escape that with a backslash so
+the payload can carry arbitrary text without breaking the document.
+*/
+function escapeScriptText(s: string): string {
+  return s.replace(/<\/(script)/gi, "<\\/$1");
+}
+
+function htmlShell(rscPayload: string, params: Record<string, string>): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BunFrame</title>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/x-component" id="__BUNFRAME_RSC__">${escapeScriptText(rscPayload)}</script>
+<script>window.__PARAMS__=${JSON.stringify(params)};</script>
+<script type="module" src="${bootstrapUrl}"></script>
+</body>
+</html>`;
+}
+
+async function streamToString(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += decoder.decode(value, { stream: true });
+  }
+  out += decoder.decode();
+  return out;
 }
 
 export async function createRoutes() {
@@ -92,27 +133,17 @@ export async function createRoutes() {
       const params = (req as any).params ?? {};
 
       const mod = await import(`${import.meta.dir}/../app/${normalizedFile}`);
-      const Page = mod.default as ComponentType;
+      const Page = mod.default as ComponentType<PageProps>;
 
       const layouts = await resolveLayouts(normalizedFile);
-      const pageTree = wrapWithLayouts(createElement(Page), layouts);
-      const tree = createElement(RouteParamsProvider, { params }, pageTree);
+      const tree = wrapWithLayouts(createElement(Page, { params }), layouts, params);
 
-      const [shell, stream] = await Promise.all([
-        fetchShell(req),
-        renderToReadableStream(tree),
-      ]);
-      await stream.allReady;
-      const html = await new Response(stream).text();
-      const fullPage = shell
-        .replace("<!--SSR-->", html)
-        .replace(
-          "</body>",
-          `<script>window.__PARAMS__=${JSON.stringify(params)}</script></body>`,
-        );
+      const rscStream = renderToReadableStream(tree, getManifest());
+      const rscPayload = await streamToString(rscStream);
 
-      return new Response(fullPage, {
-        headers: { "Content-Type": "text/html" },
+      const html = htmlShell(rscPayload, params);
+      return new Response(html, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     };
 
