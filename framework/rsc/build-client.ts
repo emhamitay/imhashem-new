@@ -48,6 +48,14 @@ export async function buildClient(opts: BuildClientOptions): Promise<BuildClient
     splitting: true,
     sourcemap: development ? "inline" : "external",
     minify: !development,
+    // The parent Bun process runs with `--conditions react-server` so React
+    // resolves to its server-only build. Without overriding here, Bun.build
+    // inherits that condition and the browser bundle ends up importing
+    // `react/jsx-dev-runtime.react-server.js` — a dynamic-require wrapper
+    // whose named exports (jsxDEV, jsx, jsxs) Bun can't statically read.
+    // Force the standard browser conditions so React resolves to its normal
+    // ESM browser build instead.
+    conditions: ["browser", "module", "import", "default"],
     naming: development
       ? { entry: "[dir]/[name].[ext]", chunk: "chunks/[name]-[hash].[ext]" }
       : { entry: "[dir]/[name]-[hash].[ext]", chunk: "chunks/[name]-[hash].[ext]" },

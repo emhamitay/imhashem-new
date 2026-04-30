@@ -27,7 +27,9 @@ import { buildStubSource, recordClientModule } from "./manifest.ts";
 // plugin doesn't intercept React's deep CJS files (which Bun must auto-detect
 // as CJS to extract named exports). Negative lookahead is supported by Bun's
 // regex flavor.
-const FILE_FILTER = /^(?!.*\/node_modules\/).*\.(?:tsx?|jsx?|mjs|cjs)$/;
+// Path separators are normalized to forward-or-backslash matches so this works
+// on both POSIX and Windows (Bun passes native paths to onLoad filters).
+const FILE_FILTER = /^(?!.*[\/\\]node_modules[\/\\]).*\.(?:tsx?|jsx?|mjs|cjs)$/;
 
 const transpilers: Record<string, Bun.Transpiler> = {
   tsx: new Bun.Transpiler({ loader: "tsx" }),
@@ -72,7 +74,7 @@ the wrapper tells us where to look. That keeps this working across React
 upgrades, monorepos, and hoisted node_modules.
 */
 
-const JSX_WRAPPER_FILTER = /\/react\/jsx(?:-dev)?-runtime\.react-server\.js$/;
+const JSX_WRAPPER_FILTER = /[\/\\]react[\/\\]jsx(?:-dev)?-runtime\.react-server\.js$/;
 const REQUIRE_PATH_RE = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
 
 function pickDeepPath(wrapperPath: string, wrapperSource: string): string | undefined {

@@ -9,44 +9,16 @@ We're not pre-rendering HTML on the server (see note.txt), so we use
 createRoot rather than hydrateRoot — there's nothing to hydrate, just an
 empty <div id="root">.
 
-react-server-dom-webpack uses two webpack-flavored globals to load referenced
-client modules:
-
-  __webpack_chunk_load__(id)  -> Promise that resolves once the chunk is loaded
-  __webpack_require__(id)     -> the module's exports, synchronously, after it's loaded
-
-In our manifest, both id and chunkId are the browser URL of the built module.
-The shims below dynamic-import the module on chunk-load and serve it back
-from a cache on require.
+The webpack-shims import MUST come first: react-server-dom-webpack reads
+__webpack_require__ at module-init time, and ES imports execute before any
+top-level code in this file. See webpack-shims.ts for details.
 */
 
+import "./webpack-shims.ts";
 import { createRoot } from "react-dom/client";
 import { createFromReadableStream } from "react-server-dom-webpack/client.browser";
 import { use, type ReactNode } from "react";
 import { createElement } from "react";
-
-declare global {
-  interface Window {
-    __webpack_chunk_load__: (id: string) => Promise<void>;
-    __webpack_require__: (id: string) => unknown;
-  }
-}
-
-const moduleCache = new Map<string, unknown>();
-
-window.__webpack_chunk_load__ = async (id: string) => {
-  if (moduleCache.has(id)) return;
-  const mod = await import(/* @vite-ignore */ id);
-  moduleCache.set(id, mod);
-};
-
-window.__webpack_require__ = (id: string) => {
-  const mod = moduleCache.get(id);
-  if (mod === undefined) {
-    throw new Error(`[RSC] module not loaded yet: ${id}`);
-  }
-  return mod;
-};
 
 function getInlineRscPayload(): string {
   const el = document.getElementById("__BUNFRAME_RSC__");
