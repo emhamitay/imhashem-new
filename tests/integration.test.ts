@@ -121,4 +121,30 @@ describe("server end-to-end", () => {
     const res = await fetch(`${baseUrl}/this-route-does-not-exist`);
     expect(res.status).toBe(404);
   });
+
+  test("Accept: text/x-component returns raw RSC payload, not HTML", async () => {
+    const res = await fetch(`${baseUrl}/login`, {
+      headers: { Accept: "text/x-component" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/x-component/);
+    expect(res.headers.get("x-bunframe-params")).toBe("{}");
+    const body = await res.text();
+    expect(body).not.toMatch(/<!doctype html/i);
+    expect(body).not.toContain("__BUNFRAME_RSC__");
+    // Page-rendered text is in the payload (RSC encodes JSX text content)
+    expect(body).toContain("Welcome to the Login Page");
+  });
+
+  test("RSC-only response carries layout content for nested routes", async () => {
+    const res = await fetch(`${baseUrl}/login`, {
+      headers: { Accept: "text/x-component" },
+    });
+    const body = await res.text();
+    // Layouts are wrapped server-side and serialized into the RSC payload, so
+    // the layout's text is in the soft-nav response too — confirming the
+    // wrapping path doesn't accidentally diverge between the two response
+    // shapes.
+    expect(body).toContain("Welcome to layout.layout!");
+  });
 });

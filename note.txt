@@ -41,27 +41,36 @@ How to add it later:
   - Or: spawn the worker per-request (slower start, simpler lifecycle).
 
 ────────────────────────────────────────────────────────────────────────────
-2) Client-side navigation (?_rsc=1) — NOT in this pass
+2) Client-side navigation — DONE
 ────────────────────────────────────────────────────────────────────────────
-The current implementation only supports initial-load hydration. Each page
-navigation is a full document load.
+Soft-navigation is in. Two new pieces and a router branch:
 
-What's missing:
-  - A handler that returns ONLY the RSC payload (no HTML shell) when the
-    request asks for it (Accept: text/x-component or ?_rsc=1)
-  - Browser-side router that intercepts <a> clicks, fetches that endpoint,
-    pipes the response into createFromFetch(), and updates a top-level
-    React state holding the current rscPromise so React rerenders the tree
-    in-place
+  - router.ts: when `Accept: text/x-component`, the route handler returns the
+    raw renderToReadableStream body with `Content-Type: text/x-component`
+    and `X-Bunframe-Params: <json>`. No HTML shell. Same URL as the page
+    request — header-only switch, so the cache key matches HTML (no _rsc=1
+    query param polluting the URL bar or breaking shareable links).
 
-Wire-up sketch for the next pass:
-  - router.ts: add a branch that, if `req.headers.get("Accept") ===
-    "text/x-component"` (or `_rsc=1`), responds with the raw RSC stream and
-    `Content-Type: text/x-component; charset=utf-8` — no HTML, no inline
-    payload, just the stream.
-  - client.ts: lift the rscPromise into useState. Add a navigate(href)
-    function that calls createFromFetch(...) and setRoot(nextPromise).
-    Hook into history.pushState + popstate.
+  - framework/client-router.ts: holds a single React state setter the
+    bootstrap registers on mount, plus navigate(href) and a popstate
+    listener. navigate() chains a then() into the fetch's Response promise
+    so X-Bunframe-Params updates window.__PARAMS__ before the body finishes
+    streaming and the new tree renders — otherwise client components calling
+    useParams() would read stale values.
+
+  - framework/Link.tsx ("use client"): renders a plain <a>, but on a primary
+    same-origin click without modifier keys / target / download, it
+    preventDefault()s and calls navigate(). External / target=_blank /
+    download / modifier-key clicks fall through to native <a> behavior.
+
+  - client.ts: rscPromise is now useState on a Root component; useEffect
+    registers the setter and starts the router.
+
+  - server.ts: scanForClientModules now also walks framework/ so Link.tsx
+    (and the existing hooks.ts) are picked up as client-build entries.
+
+Deliberately not done: scroll restoration, prefetch on hover, view
+transitions, pending-state UX, type-checked routes. Add when actually needed.
 
 ────────────────────────────────────────────────────────────────────────────
 3) "use server" / Server Functions — NOT in this pass
@@ -114,11 +123,17 @@ swap, RSC payload re-fetch, React state preservation) — out of scope here.
   framework/rsc/build-client.ts  Runs Bun.build() on (bootstrap + every
                                  "use client" file), produces the manifest
                                  the RSC renderer consumes.
-  framework/router.ts            Now renders only the RSC payload and
-                                 embeds it in an HTML shell.
-  client.ts                      Reads the inline RSC payload and mounts
-                                 via createRoot. Provides webpack-flavored
-                                 chunk-load/require shims that just use
-                                 dynamic import().
+  framework/router.ts            Renders the RSC payload and embeds it in
+                                 an HTML shell on normal requests; returns
+                                 the raw stream on Accept: text/x-component.
+  framework/client-router.ts     Browser-side router. navigate(href),
+                                 popstate handler, registerSetRoot wiring.
+  framework/Link.tsx             "use client" link component. Soft-nav for
+                                 primary same-origin clicks; falls through
+                                 to native <a> otherwise.
+  client.ts                      Reads the inline RSC payload, lifts the
+                                 rscPromise into Root's state so the client
+                                 router can swap it on navigation, and
+                                 mounts via createRoot.
   server.ts                      Boots: register plugin → scan → build
                                  client → start serving.

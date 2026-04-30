@@ -122,6 +122,22 @@ async function streamToString(stream: ReadableStream<Uint8Array>): Promise<strin
   return out;
 }
 
+/*
+Soft-navigation requests come from the browser-side router with
+`Accept: text/x-component`. They get back the raw RSC stream — no HTML shell,
+no bootstrap script — which the client deserializes and swaps into the live
+React tree. Same URL as the HTML response; the Accept header is the only
+difference, so the cache key story matches a normal page (no `?_rsc=1` query).
+
+`X-Bunframe-Params` carries the route params back out so the client can refresh
+`window.__PARAMS__` (which the HTML shell inlines on first load) before the
+new tree renders — otherwise client components reading params via useParams
+would see stale values across navigation.
+*/
+function wantsRscOnly(req: Request): boolean {
+  return req.headers.get("Accept") === "text/x-component";
+}
+
 export async function createRoutes() {
   const glob = new Bun.Glob("**/page.tsx");
   const routes: Record<string, RouteHandler> = {};
@@ -139,8 +155,18 @@ export async function createRoutes() {
       const tree = wrapWithLayouts(createElement(Page, { params }), layouts, params);
 
       const rscStream = renderToReadableStream(tree, getManifest());
-      const rscPayload = await streamToString(rscStream);
 
+      if (wantsRscOnly(req)) {
+        return new Response(rscStream, {
+          headers: {
+            "Content-Type": "text/x-component; charset=utf-8",
+            "X-Bunframe-Params": JSON.stringify(params),
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+
+      const rscPayload = await streamToString(rscStream);
       const html = htmlShell(rscPayload, params);
       return new Response(html, {
         headers: { "Content-Type": "text/html; charset=utf-8" },

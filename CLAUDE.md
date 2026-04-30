@@ -15,7 +15,10 @@ app/                       file-routed pages (Server Components by default)
 components/                shared components ("use client" allowed)
 framework/
   router.ts                glob app/, render RSC payload, embed in HTML shell
+                           (or return raw RSC on Accept: text/x-component)
   hooks.ts                 useParams (client-only)
+  Link.tsx                 client component for soft navigation
+  client-router.ts         browser-side navigate() + popstate handler
   rsc/
     directives.ts          ECMAScript directive-prologue scanner
     plugin.ts              Bun runtime plugin: stubs "use client", JSX shim
@@ -55,17 +58,16 @@ its server-only build.
 
 `note.txt` has the full reasoning. Short version, in the order I'd tackle:
 
-1. **Client-side navigation (`?_rsc=1`)** — without it every link click is a
-   full document load. Returns RSC payload only on `Accept: text/x-component`,
-   browser-side router updates a top-level state holding the current
-   `rscPromise`. Sketch in note.txt §2.
-2. **`"use server"` / Server Functions** — directive scanner already
+1. **`"use server"` / Server Functions** — directive scanner already
    detects it, plugin has the branch reserved. Need: client-side fetch
    stub generation, `/__fn/:id` route handler, registry. Sketch in note.txt §3.
-3. **HTML SSR pre-render (Pass 2)** — needs a worker thread or subprocess
+2. **HTML SSR pre-render (Pass 2)** — needs a worker thread or subprocess
    running React WITHOUT `--conditions react-server`. Biggest lift, mostly
    improves first-contentful-paint. Sketch in note.txt §1.
-4. **RSC HMR** — quality-of-life. Lowest priority. Sketch in note.txt §4.
+3. **RSC HMR** — quality-of-life. Lowest priority. Sketch in note.txt §4.
+
+Done: client-side navigation (note.txt §2). `<Link>` from `framework/Link.tsx`
+for opt-in soft-nav; server returns raw RSC on `Accept: text/x-component`.
 
 ## Two Bun-specific gotchas already encountered
 
