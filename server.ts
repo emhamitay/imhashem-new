@@ -18,6 +18,9 @@ console.log("[BunFrame] Scanning for client modules...");
 const { clientFiles } = await scanForClientModules([
   join(projectRoot, "app"),
   join(projectRoot, "components"),
+  // framework/ contains client primitives like Link.tsx and hooks.ts that
+  // ship to the browser as "use client" entry points.
+  join(projectRoot, "framework"),
 ]);
 console.log(`[BunFrame] Found ${clientFiles.length} client module(s)`);
 
