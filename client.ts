@@ -13,12 +13,13 @@ The current rscPromise lives in React state on Root so the client router
 can swap it on navigation (`<Link>` clicks, popstate). registerSetRoot wires
 the setter into the module-level singleton in client-router.ts.
 
-The webpack-shims import MUST come first: react-server-dom-webpack reads
-__webpack_require__ at module-init time, and ES imports execute before any
-top-level code in this file. See webpack-shims.ts for details.
+The webpack-flavored globals (__webpack_require__ etc.) that rsdw reads at
+module-init time are installed by an inline <script> in the HTML shell
+(see framework/router.ts). Doing it from a sibling import here would be
+too late: with code-splitting, rsdw is lifted into a shared chunk that
+evaluates before this entry's body runs.
 */
 
-import "./webpack-shims.ts";
 import { createRoot } from "react-dom/client";
 import { createFromReadableStream } from "react-server-dom-webpack/client.browser";
 import { use, useEffect, useState, type ReactNode } from "react";

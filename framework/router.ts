@@ -92,6 +92,18 @@ function escapeScriptText(s: string): string {
   return s.replace(/<\/(script)/gi, "<\\/$1");
 }
 
+/*
+The webpack shims MUST be installed before the module bundle starts evaluating.
+With code-splitting on, Bun lifts react-server-dom-webpack into a shared chunk;
+that chunk's top-level body materializes the rsdw CJS module (which reads
+`__webpack_require__.u` at init), and shared chunks evaluate before any entry
+body. So an `import "./webpack-shims.ts"` inside client.ts is too late — by
+the time the entry body runs, the shared chunk has already thrown. Inlining
+the shim as a plain <script> before the module script is the only point that
+predates chunk evaluation.
+*/
+const WEBPACK_SHIMS_INLINE = `(()=>{const c=new Map;window.__webpack_chunk_load__=async i=>{if(c.has(i))return;c.set(i,await import(i))};window.__webpack_require__=i=>{const m=c.get(i);if(m===undefined)throw new Error("[RSC] module not loaded yet: "+i);return m};window.__webpack_get_script_filename__=i=>i;})();`;
+
 function htmlShell(rscPayload: string, params: Record<string, string>): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -103,7 +115,7 @@ function htmlShell(rscPayload: string, params: Record<string, string>): string {
 <body>
 <div id="root"></div>
 <script type="text/x-component" id="__BUNFRAME_RSC__">${escapeScriptText(rscPayload)}</script>
-<script>window.__PARAMS__=${JSON.stringify(params)};</script>
+<script>window.__PARAMS__=${JSON.stringify(params)};${WEBPACK_SHIMS_INLINE}</script>
 <script type="module" src="${bootstrapUrl}"></script>
 </body>
 </html>`;

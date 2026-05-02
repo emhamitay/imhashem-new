@@ -14,6 +14,7 @@ async function ProductList() {
 }
 
 import { Counter } from "../components/Counter.tsx"
+import Button from "../components/Button.tsx"
 
 export default async function Page() {
   const productList = await ProductList()
@@ -25,6 +26,7 @@ export default async function Page() {
       {productList}
       <div id="counter-root">
         <Counter />
+        <Button />
       </div>
     </div>
   )
