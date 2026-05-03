@@ -6,6 +6,7 @@ function Layout({children} : {children:React.ReactNode}) {
     <><div>This is a big header</div>
     <Link href='/'>Home</Link>
     <Link href='/login'>Login</Link>
+    <Link href='/actions-test/demo'>Actions Test</Link>
       {children}
     </>
   );

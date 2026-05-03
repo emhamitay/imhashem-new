@@ -206,7 +206,7 @@ describe("Server Functions", () => {
       method: "POST",
       headers: {
         Accept: "text/x-component",
-        "X-Bunframe-Action-Id": id,
+        "X-Bunframe-Action-Id": encodeURIComponent(id),
         "Content-Type":
           typeof body === "string" ? "text/plain;charset=utf-8" : "multipart/form-data",
       },
@@ -234,7 +234,7 @@ describe("Server Functions", () => {
       method: "POST",
       headers: {
         Accept: "text/x-component",
-        "X-Bunframe-Action-Id": id,
+        "X-Bunframe-Action-Id": encodeURIComponent(id),
         "Content-Type":
           typeof body === "string" ? "text/plain;charset=utf-8" : "multipart/form-data",
       },

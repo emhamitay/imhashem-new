@@ -41,7 +41,9 @@ export async function callServer(id: string, args: unknown[]): Promise<unknown> 
     method: "POST",
     headers: {
       Accept: "text/x-component",
-      "X-Bunframe-Action-Id": id,
+      // Header values must be Latin-1; module paths on Windows can contain
+      // non-ASCII chars. Encode in transit and decode in router.ts.
+      "X-Bunframe-Action-Id": encodeURIComponent(id),
     },
     body: body as BodyInit,
   });

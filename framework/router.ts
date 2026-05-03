@@ -166,6 +166,16 @@ function wantsRscOnly(req: Request): boolean {
   return req.headers.get("Accept") === "text/x-component";
 }
 
+function readActionId(req: Request): string | null {
+  const raw = req.headers.get("X-Bunframe-Action-Id");
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /*
 GET handler. Renders the route to RSC, then returns either the raw stream
 (soft-nav) or an HTML shell with the payload embedded (initial load).
@@ -219,7 +229,7 @@ HTML shell with the freshly-rendered RSC embedded — same shape as a GET.
 function makePostHandler(normalizedFile: string): RouteHandler {
   return async (req) => {
     const params = (req as unknown as { params?: Record<string, string> }).params ?? {};
-    const actionId = req.headers.get("X-Bunframe-Action-Id");
+    const actionId = readActionId(req);
     const contentType = req.headers.get("Content-Type") ?? "";
 
     let returnValue: unknown = null;

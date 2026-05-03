@@ -5,7 +5,7 @@ import { useParams } from "../framework/hooks"
 
 export function Counter() {
   const [count, setCount] = useState(0)
-  const param = useParams<{ name: string }>();
+  const param = useParams();
 
   return (
     <div>

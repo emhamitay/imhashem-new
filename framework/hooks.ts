@@ -6,9 +6,9 @@ router writes into the HTML shell. Server Components don't use it — they
 receive `params` as a prop directly from the router (the RSC convention).
 */
 
-export function useParams<T = Record<string, string>>(): T {
+export function useParams(): Record<string, string> {
   if (typeof window !== "undefined") {
-    return ((window as any).__PARAMS__ ?? {}) as T;
+    return ((window as any).__PARAMS__ ?? {}) as Record<string, string>;
   }
-  return {} as T;
+  return {};
 }
