@@ -4,6 +4,7 @@ import { registerRscServerPlugin } from "./framework/rsc/plugin.ts";
 import { scanForClientModules } from "./framework/rsc/scan.ts";
 import { buildClient, publicPathToDisk, CLIENT_PUBLIC_PREFIX } from "./framework/rsc/build-client.ts";
 import { createRoutes, setRouterConfig } from "./framework/router.ts";
+import { installServerWebpackShims } from "./framework/rsc/server-fn.ts";
 
 const isDev = process.env.NODE_ENV === "development";
 const projectRoot = import.meta.dir;
@@ -14,20 +15,30 @@ const clientOutdir = join(projectRoot, ".bunframe", "client");
 // "use client" files would be loaded as real components on the server.
 registerRscServerPlugin();
 
-console.log("[BunFrame] Scanning for client modules...");
-const { clientFiles } = await scanForClientModules([
+// Install __webpack_require__ / __webpack_chunk_load__ on globalThis so
+// rsdw/server.edge can resolve server references during decodeAction or
+// when a flight stream encodes a server function. The shim defers each id
+// to a Bun-native dynamic import.
+installServerWebpackShims();
+
+console.log("[BunFrame] Scanning for client and server-fn modules...");
+const { clientFiles, serverFnFiles } = await scanForClientModules([
   join(projectRoot, "app"),
   join(projectRoot, "components"),
   // framework/ contains client primitives like Link.tsx and hooks.ts that
   // ship to the browser as "use client" entry points.
   join(projectRoot, "framework"),
 ]);
-console.log(`[BunFrame] Found ${clientFiles.length} client module(s)`);
+console.log(
+  `[BunFrame] Found ${clientFiles.length} client module(s), ${serverFnFiles.length} server-fn module(s)`,
+);
 
 console.log("[BunFrame] Building client bundle...");
 const { bootstrapUrl } = await buildClient({
   entries: clientFiles,
+  serverFnEntries: serverFnFiles,
   bootstrap: join(projectRoot, "client.ts"),
+  callServer: join(projectRoot, "framework", "rsc", "call-server.ts"),
   outdir: clientOutdir,
   cwd: projectRoot,
   development: isDev,

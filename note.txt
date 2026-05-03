@@ -1,9 +1,11 @@
-BunFrame RSC — design notes (v1)
+BunFrame RSC — design notes (v2)
 ================================
 
-This pass added a working React Server Components pipeline. A few decisions
-were made under constraints worth recording so we know what to revisit and
-why.
+This file records design decisions and what was deliberately deferred. v1
+landed RSC + client-side soft-nav. v2 added module-level Server Functions
+with `<form action>` and `useActionState` plumbing. The structure of the
+file is the same: each section is a feature, with what we shipped, what we
+didn't, and why.
 
 ────────────────────────────────────────────────────────────────────────────
 1) Single process, --conditions react-server, NO server-side HTML pre-render
@@ -51,43 +53,92 @@ Soft-navigation is in. Two new pieces and a router branch:
     request — header-only switch, so the cache key matches HTML (no _rsc=1
     query param polluting the URL bar or breaking shareable links).
 
-  - framework/client-router.ts: holds a single React state setter the
-    bootstrap registers on mount, plus navigate(href) and a popstate
-    listener. navigate() chains a then() into the fetch's Response promise
-    so X-Bunframe-Params updates window.__PARAMS__ before the body finishes
-    streaming and the new tree renders — otherwise client components calling
-    useParams() would read stale values.
+  - framework/client-router.ts: navigate(href) and a popstate listener.
+    Updates window.__PARAMS__ from X-Bunframe-Params before the body
+    finishes streaming so client components calling useParams() see the
+    new values, not stale ones.
 
   - framework/Link.tsx ("use client"): renders a plain <a>, but on a primary
     same-origin click without modifier keys / target / download, it
     preventDefault()s and calls navigate(). External / target=_blank /
     download / modifier-key clicks fall through to native <a> behavior.
 
-  - client.ts: rscPromise is now useState on a Root component; useEffect
-    registers the setter and starts the router.
-
-  - server.ts: scanForClientModules now also walks framework/ so Link.tsx
-    (and the existing hooks.ts) are picked up as client-build entries.
+The setRoot setter (formerly held in client-router.ts) now lives in
+framework/rsc/call-server.ts. Both navigation and Server Function calls
+swap the live tree through that one setter — single source of truth.
 
 Deliberately not done: scroll restoration, prefetch on hover, view
 transitions, pending-state UX, type-checked routes. Add when actually needed.
 
 ────────────────────────────────────────────────────────────────────────────
-3) "use server" / Server Functions — NOT in this pass
+3) Server Functions ("use server", module-level) — DONE
 ────────────────────────────────────────────────────────────────────────────
-The directive scanner already detects "use server" and the plugin has a
-branch reserved for it. We did NOT implement the server-function transform
-(turning each export into a POST endpoint with stable IDs and a registry).
+Every export of a "use server" file becomes a Server Function: callable from
+client components, callable as a `<form action>`, integrates with
+useActionState. Module-level only — inline closures (`function() { "use server"; ... }`
+inside a server component) are NOT supported in this pass; see §7.
 
-Plan:
-  - Plugin: when isolating a "use server" file for the CLIENT build (which
-    we don't currently do — server-only files are simply not bundled for
-    the browser), emit a stub whose exports are fetch() calls to /__fn/<id>.
-  - Server: register a /__fn/:id handler that decodes args via
-    react-server-dom-webpack/server.edge#decodeReply, invokes the real
-    function, and encodes the result.
-  - Inline (function-level) "use server" inside server components needs the
-    same treatment but with auto-generated IDs.
+Wire shape:
+
+  ID             ${absPath}#${exportName} — same scheme manifest.ts uses for
+                 client refs. Stable across restarts on the same disk.
+                 No content hashing, no key registry to maintain.
+
+  Endpoint       The page route handles BOTH GET and POST. POSTing to the
+                 route is "call a Server Function in the context of this
+                 page". This matches Next.js's shape (POST to current URL +
+                 header) and lets us re-render the route in the same response.
+
+  JS-driven      Client's callServer (in framework/rsc/call-server.ts) sets
+                 `X-Bunframe-Action-Id: <id>` and posts an encodeReply()
+                 body. Server: lookup fn by id (lazy `await import(absPath)`),
+                 decodeReply args, await fn(...args), then re-render the
+                 route. Response is a flight stream encoding
+                 { returnValue, root }. Client puts returnValue back to the
+                 caller and swaps the live tree to root — so every action
+                 transparently refreshes the page.
+
+  Form submit    `<form action={fn}>` works without JS. React serializes
+                 action metadata into FormData fields ($ACTION_REF_*,
+                 $ACTION_ID_*). Server uses decodeAction(formData,
+                 serverManifest) to recover the bound function call,
+                 decodeFormState for useActionState, then renders HTML —
+                 same shell shape as a GET, with formState plumbed through
+                 renderToReadableStream's options so useActionState reads
+                 the right value on the next render.
+
+  Cross-boundary When a server component passes a server fn as a prop to a
+                 client component, the encoder needs to recognize the fn as
+                 a reference. The runtime plugin appends
+                 `registerServerReference(fn, absPath, name)` to every
+                 "use server" file at server-side load time, so the function
+                 carries the right $$typeof/$$id metadata.
+
+  Browser stubs  Bun.build's plugin (build-client.ts → makeUseServerStubPlugin)
+                 replaces every "use server" file with createServerReference
+                 calls. Without this, real server code would land in the
+                 browser bundle — a security hole. The runtime plugin from
+                 framework/rsc/plugin.ts is global to the Bun process, but
+                 verified empirically that Bun.build does NOT inherit
+                 globally-registered plugins, so the two pipelines stay
+                 cleanly separate.
+
+  Server shims   rsdw/server.edge calls __webpack_require__ /
+                 __webpack_chunk_load__ on globalThis when resolving server
+                 references during decodeAction. server-fn.ts'
+                 installServerWebpackShims hangs Bun-native dynamic imports
+                 off those globals, keyed by absPath.
+
+What was reused: parseFnId / serverFnId mirror the client-ref id scheme.
+ClientManifest type is reused for the server-reference manifest (same
+{ id, chunks, name, async } shape).
+
+What was deliberately cut from v1:
+  - default exports of "use server" files are skipped. Use named exports.
+    Adding default support means generating a binding for an anonymous
+    expression, which we can't do without a real AST pass. Documented in
+    server-fn.ts comments.
+  - $$bound encryption — only meaningful when we have inline closures. See §7.
 
 ────────────────────────────────────────────────────────────────────────────
 4) HMR — NOT in this pass
@@ -97,7 +148,7 @@ correct but slow. True RSC HMR has three moving parts (client-build chunk
 swap, RSC payload re-fetch, React state preservation) — out of scope here.
 
 ────────────────────────────────────────────────────────────────────────────
-5) Files removed during this pass
+5) Files removed during the v1 pass
 ────────────────────────────────────────────────────────────────────────────
   - app/(test)/api/[name]/{page,test}.tsx  (route-system experiments)
   - app/[id]/[name]/page.tsx               (route-system experiments)
@@ -107,33 +158,154 @@ swap, RSC payload re-fetch, React state preservation) — out of scope here.
                                             hashed script tags)
 
 ────────────────────────────────────────────────────────────────────────────
-6) New layout
+6) Layout
 ────────────────────────────────────────────────────────────────────────────
   framework/rsc/directives.ts    Directive scanner (skips //, /* */, BOM,
                                  multiple "use strict"/etc. before
                                  "use client"/"use server")
-  framework/rsc/manifest.ts      Shared client-manifest state + stub source
-                                 generator
-  framework/rsc/scan.ts          Walks app/ and components/ at startup to
-                                 find every "use client" file
+  framework/rsc/manifest.ts      Client-reference manifest (state + stub
+                                 source generator)
+  framework/rsc/server-fn.ts     Server Function id helpers, server-reference
+                                 manifest, browser-stub generator,
+                                 server-side wrapper appendix, and the
+                                 globalThis __webpack_* shim installer.
+  framework/rsc/call-server.ts   Browser-only. The callServer singleton that
+                                 every server-reference proxy posts through;
+                                 also holds the React setRoot used by both
+                                 navigation and action auto-rerender.
+  framework/rsc/scan.ts          Walks app/, components/, framework/ at
+                                 startup; collects "use client" AND
+                                 "use server" files.
   framework/rsc/plugin.ts        Bun runtime plugin: replaces "use client"
-                                 modules with client-reference stubs at
-                                 import time. Uses Bun.Transpiler.scan() —
-                                 no regex.
-  framework/rsc/build-client.ts  Runs Bun.build() on (bootstrap + every
-                                 "use client" file), produces the manifest
-                                 the RSC renderer consumes.
-  framework/router.ts            Renders the RSC payload and embeds it in
-                                 an HTML shell on normal requests; returns
-                                 the raw stream on Accept: text/x-component.
-  framework/client-router.ts     Browser-side router. navigate(href),
-                                 popstate handler, registerSetRoot wiring.
-  framework/Link.tsx             "use client" link component. Soft-nav for
-                                 primary same-origin clicks; falls through
-                                 to native <a> otherwise.
-  client.ts                      Reads the inline RSC payload, lifts the
-                                 rscPromise into Root's state so the client
-                                 router can swap it on navigation, and
-                                 mounts via createRoot.
-  server.ts                      Boots: register plugin → scan → build
-                                 client → start serving.
+                                 modules with client-reference stubs and
+                                 appends registerServerReference to
+                                 "use server" modules. Global to the server
+                                 process; does NOT bleed into Bun.build.
+  framework/rsc/build-client.ts  Bun.build for the browser graph. A
+                                 build-local plugin (makeUseServerStubPlugin)
+                                 replaces "use server" files with
+                                 createServerReference stubs. Returns both
+                                 the client and server reference manifests.
+  framework/router.ts            Page routes return { GET, POST }. GET
+                                 renders to RSC and either embeds in HTML
+                                 or returns raw. POST handles two action
+                                 dispatch paths (X-Bunframe-Action-Id +
+                                 multipart form), then re-renders and
+                                 returns { returnValue, root } (or HTML
+                                 with formState plumbed through).
+  framework/client-router.ts     Browser-side router. navigate(href) and
+                                 popstate; uses the shared setRoot from
+                                 call-server.ts.
+  framework/Link.tsx             "use client" link component.
+  client.ts                      Reads the inline RSC payload, lifts it into
+                                 Root state so both navigation and actions
+                                 can swap it, and mounts via createRoot.
+  server.ts                      Boots: register plugin → install server
+                                 webpack shims → scan → build client →
+                                 start serving.
+
+────────────────────────────────────────────────────────────────────────────
+7) Inline "use server" closures — NOT in this pass; full sketch
+────────────────────────────────────────────────────────────────────────────
+This is the biggest piece of Server Functions parity that we deliberately
+skipped. Here's the plan in enough detail that whoever picks it up next
+doesn't have to re-derive it.
+
+Goal:
+
+    export default function Page({ userId }) {
+      async function deletePost(postId) {
+        "use server";
+        await db.deletePost({ userId, postId });
+      }
+      return <Form action={deletePost} />;
+    }
+
+`deletePost` closes over `userId`. It has to be:
+  (a) liftable to module scope so it has a stable identity to assign an ID
+  (b) callable from the client without leaking userId in plaintext
+
+The transform (compile time):
+
+  1. Find every function whose body's first statement is `"use server"`.
+     Function declarations, function expressions, and arrow functions. Also
+     class methods if we want to be thorough.
+
+  2. For each such function, compute its FREE VARIABLES — every identifier
+     read in the body that isn't bound locally. Local bindings include:
+       - parameters and destructured parameter patterns
+       - var/let/const declarations and their destructuring
+       - inner function declarations
+       - catch clause bindings
+       - for/for-in/for-of loop variables
+       - class declarations and their methods
+       - imports (these are "free" but should be kept as imports, not bound)
+     Module-scope identifiers and unresolved references should be passed
+     through (they'll be available in the lifted function too).
+
+  3. Lift the function to module scope. Generate a stable ID via SHA-256
+     over the lifted source (matches Next.js's content-hash approach).
+
+       async function $$action_<hash>(__userId, postId) {
+         /* original body, with `userId` rewritten to `__userId` if needed —
+            but if the original name doesn't shadow anything we can just
+            keep it: `async function $$action_<hash>(userId, postId) { ... }` */
+       }
+       registerServerReference($$action_<hash>, "<hash>", null);
+
+  4. Replace the original site with a bound reference:
+
+       const deletePost = $$action_<hash>.bind(null, userId);
+
+     React's flight encoder serializes a function with $$bound as a server
+     reference; the client sees it as a callable that POSTs id + bound args.
+
+  5. Encrypt the bound args. Without this, the client can read userId off
+     the wire (info leak) AND submit a request with userId substituted
+     (privilege escalation — the server would happily run deletePost as
+     someone else).
+
+       - Per-process AES-GCM key. Bun has Web Crypto natively.
+       - Key in memory only by default. Restart invalidates in-flight
+         encrypted bound args; acceptable.
+       - For multi-instance deployments, env var BUNFRAME_ACTION_KEY
+         (base64 of 32 random bytes). Document.
+       - Encrypt at the encoding boundary (when we serialize bound args
+         out), decrypt at the decoding boundary (when decodeReply hands
+         them back to us).
+
+AST tooling — we currently use Bun.Transpiler.scan (exports only). For step
+2 we need real scope analysis. Options:
+  - oxc-parser (Rust core, npm package). Fast, has scope info. Recommended.
+  - @swc/core. What Next.js uses. Heavy, but well-trodden.
+  - Babel. Slower; ergonomic plugin API. Probably overkill.
+  - Hand-rolled. Don't.
+
+What it touches:
+  - framework/rsc/inline-server-fn.ts (NEW): the AST pass + crypto helpers.
+  - framework/rsc/plugin.ts: invoke the AST pass before the existing
+    "use server" branch. The branch already records server modules and
+    appends registerServerReference; the inline pass adds new top-level
+    declarations whose ids the appendix should also register.
+  - framework/rsc/build-client.ts: the makeUseServerStubPlugin needs to
+    handle inline-lifted ids. Since they're now module-level
+    declarations, the existing stub generator works — just feed it the
+    id list from the AST pass alongside the file's regular exports.
+
+Non-negotiable: when this lands, $$bound encryption MUST land with it.
+No "v1 without crypto" — that's a real privilege-escalation hole, not a
+nice-to-have.
+
+────────────────────────────────────────────────────────────────────────────
+8) Things still missing for "would I ship it for real"
+────────────────────────────────────────────────────────────────────────────
+Honest list, roughly priority order:
+  - SSR pre-render (§1) — biggest user-visible win (FCP).
+  - HMR (§4) — DX.
+  - Inline "use server" (§7) — Next.js parity.
+  - Revalidation primitives (revalidatePath / revalidateTag / cache).
+  - Metadata API (head, title, fonts).
+  - useActionState progressive-enhancement: we plumb formState through but
+    haven't end-to-end tested a no-JS submit with state preservation. The
+    JS path works; the no-JS path needs an integration test before it can
+    be claimed.

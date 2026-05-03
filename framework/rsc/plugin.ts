@@ -22,6 +22,7 @@ import { plugin } from "bun";
 import { dirname, resolve as pathResolve } from "node:path";
 import { hasUseClient, hasUseServer } from "./directives.ts";
 import { buildStubSource, recordClientModule } from "./manifest.ts";
+import { buildServerWrapperAppendix, recordServerModule } from "./server-fn.ts";
 
 // Match user source files only — exclude anything under node_modules so the
 // plugin doesn't intercept React's deep CJS files (which Bun must auto-detect
@@ -136,10 +137,17 @@ export const rscServerPlugin: Bun.BunPlugin = {
       }
 
       if (hasUseServer(source)) {
-        // Reserved for the upcoming server-functions pass. For now, leave the
-        // module untouched — server code will still execute correctly when
-        // imported from another server module. The transform that turns each
-        // export into a POST endpoint will live here.
+        // Server-side: original code runs as written, but every named function
+        // export gets registerServerReference appended so React's flight
+        // encoder can serialize it when it crosses the server→client boundary
+        // as a prop. The POST dispatch (X-Bunframe-Action-Id path) doesn't
+        // need this — it imports by absPath directly — but prop-passing does.
+        const exports = extractExports(source, path);
+        recordServerModule(path, exports);
+        return {
+          contents: source + buildServerWrapperAppendix(path, exports),
+          loader,
+        };
       }
 
       return { contents: source, loader };

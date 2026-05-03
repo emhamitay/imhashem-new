@@ -15,30 +15,83 @@ import { join, relative, resolve } from "node:path";
 import { mkdir, rm } from "node:fs/promises";
 import type { ClientManifest } from "./manifest.ts";
 import { setManifest, getClientModules } from "./manifest.ts";
+import { hasUseServer } from "./directives.ts";
+import {
+  buildBrowserStubSource,
+  getServerModules,
+  setServerManifest,
+  setCallServerPath,
+} from "./server-fn.ts";
 
 export const CLIENT_PUBLIC_PREFIX = "/__bunframe/client/";
 
 export type BuildClientOptions = {
   entries: string[];
-  bootstrap: string;       // absolute path to the browser bootstrap (client.ts)
-  outdir: string;          // absolute path to write chunks into
-  cwd: string;             // project root (used for naming)
+  serverFnEntries: string[];   // absolute paths of "use server" files (bundled as stubs)
+  bootstrap: string;           // absolute path to the browser bootstrap (client.ts)
+  callServer: string;          // absolute path to framework/rsc/call-server.ts
+  outdir: string;              // absolute path to write chunks into
+  cwd: string;                 // project root (used for naming)
   development: boolean;
 };
 
 export type BuildClientResult = {
-  manifest: ClientManifest;
+  manifest: ClientManifest;          // client-reference manifest (passed to renderToReadableStream)
+  serverManifest: ClientManifest;    // server-reference manifest (passed to decodeAction/decodeReply)
   outdir: string;
   bootstrapUrl: string;
 };
 
+/*
+A Bun.build plugin that mirrors framework/rsc/plugin.ts but for the BROWSER
+graph. When the bundler encounters a "use server" file, we replace its
+contents with a stub of server-reference proxies. Without this, real server
+code would end up in the browser bundle — a security hole.
+*/
+function makeUseServerStubPlugin(serverFnAbsPaths: Set<string>): Bun.BunPlugin {
+  return {
+    name: "bunframe-use-server-browser-stub",
+    setup(build) {
+      const filter = /\.(?:tsx?|jsx?|mjs|cjs)$/;
+      build.onLoad({ filter }, async ({ path }) => {
+        // Fast-path: only inspect files we discovered at scan time. Anything
+        // else (node_modules, framework internals) gets the default loader.
+        if (!serverFnAbsPaths.has(path)) {
+          // Still need to defensively check files that might have been added
+          // since scan: cheap text read, only matters for first import.
+          const src = await Bun.file(path).text();
+          if (!hasUseServer(src)) return undefined;
+          // Fall through with discovered exports if any — but without scan
+          // we don't have a clean export list, so do a transpiler scan now.
+          const t = new Bun.Transpiler({ loader: "tsx" });
+          const exports = t.scan(src).exports;
+          return { contents: buildBrowserStubSource(path, exports), loader: "js" };
+        }
+        const src = await Bun.file(path).text();
+        const t = new Bun.Transpiler({ loader: "tsx" });
+        const exports = t.scan(src).exports;
+        return { contents: buildBrowserStubSource(path, exports), loader: "js" };
+      });
+    },
+  };
+}
+
 export async function buildClient(opts: BuildClientOptions): Promise<BuildClientResult> {
-  const { entries, bootstrap, outdir, cwd, development } = opts;
+  const { entries, serverFnEntries, bootstrap, callServer, outdir, cwd, development } = opts;
+  setCallServerPath(callServer);
+  const serverFnSet = new Set(serverFnEntries.map((p) => resolve(p)));
 
   await rm(outdir, { recursive: true, force: true });
   await mkdir(outdir, { recursive: true });
 
-  const allEntries = [bootstrap, ...entries];
+  // Server-fn files are bundled into the browser graph as stubs (the plugin
+  // intercepts onLoad and replaces their source). They MUST be present as
+  // entry points so the bundler emits one chunk per file the manifest can
+  // point to — though for v1 the browser stubs are only reached transitively
+  // (a "use client" component imports them), so listing them as entries is
+  // belt-and-suspenders for code-splitting and for tests that need to hit the
+  // chunk URL directly.
+  const allEntries = [bootstrap, ...entries, ...serverFnEntries];
 
   const result = await Bun.build({
     entrypoints: allEntries,
@@ -48,6 +101,7 @@ export async function buildClient(opts: BuildClientOptions): Promise<BuildClient
     splitting: true,
     sourcemap: development ? "inline" : "external",
     minify: !development,
+    plugins: [makeUseServerStubPlugin(serverFnSet)],
     // The parent Bun process runs with `--conditions react-server` so React
     // resolves to its server-only build. Without overriding here, Bun.build
     // inherits that condition and the browser bundle ends up importing
@@ -106,9 +160,25 @@ export async function buildClient(opts: BuildClientOptions): Promise<BuildClient
   }
   const bootstrapUrl = absToPublicUrl(bootstrapOut, outdir);
 
+  // Build the SERVER-side manifest used by decodeAction/decodeReply when a
+  // server reference comes in over the wire. Keys are absolute paths (the
+  // same `id` we register with registerServerReference). The server-side
+  // __webpack_require__ shim resolves these via dynamic import — see
+  // installServerWebpackShims().
+  const serverManifest: ClientManifest = {};
+  for (const [absPath, info] of getServerModules()) {
+    serverManifest[absPath] = {
+      id: absPath,
+      chunks: [absPath, absPath],
+      name: info.exports[0] ?? "",
+      async: false,
+    };
+  }
+
   setManifest(manifest);
+  setServerManifest(serverManifest);
   void cwd;
-  return { manifest, outdir, bootstrapUrl };
+  return { manifest, serverManifest, outdir, bootstrapUrl };
 }
 
 function basename(p: string): string {
