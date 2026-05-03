@@ -37,10 +37,72 @@ For most pages the payload is in the same HTML response so the delay is
 small (no extra round trip).
 
 How to add it later:
-  - Spawn a worker on boot that imports React/react-dom/server WITHOUT the
-    react-server condition, plus the client manifest. Pipe the RSC stream to
-    the worker; it returns a stream of HTML.
-  - Or: spawn the worker per-request (slower start, simpler lifecycle).
+  Run Pass 2 in a separate JS context whose React resolves WITHOUT the
+  react-server condition. Three options, in increasing cost:
+
+    A) Worker thread (recommended). node:worker_threads / Bun's Worker.
+       The worker's entry imports react-dom/server and
+       react-server-dom-webpack/client.edge. Per-request: tee() the RSC
+       stream, send one branch to the worker over postMessage (streams
+       are transferable), receive HTML chunks back, splice them into the
+       response body where <div id="root"> sits.
+    B) Subprocess. Same shape, separate `bun` process. Heavier startup,
+       easier crash isolation, easier to instrument.
+    C) node:vm context. In theory cleanest module-resolution story, in
+       practice Bun's vm support is incomplete — fighting the runtime.
+
+  Concrete work (option A), in order:
+
+    1. framework/ssr-worker.ts (NEW). Worker entry. Imports react-dom/server
+       and react-server-dom-webpack/client.edge. Listens for
+       { rscStream, clientManifest } messages. Returns an HTML stream
+       built by createFromReadableStream(rsc) → renderToReadableStream(el).
+    2. server.ts: spawn the worker after buildClient resolves. Pass the
+       client manifest so the worker can resolve client refs to bundle
+       URLs during the SSR pass. Worker handle is held in a
+       module-scoped singleton.
+    3. framework/router.ts (GET branch): after renderToReadableStream
+       returns the RSC stream, call rsc.tee(). One branch is posted to
+       the worker for HTML; the other is the existing inline-payload path.
+       Build the response body so the HTML stream is piped into the body
+       first, followed by the inline RSC <script>. Both must finish
+       streaming before the response closes — coordinate with a
+       TransformStream.
+    4. client.ts: when prerendered HTML is present, switch from
+       createRoot(...).render(<Root/>) to hydrateRoot(rootEl, <Root/>).
+       The RSC payload parsing is unchanged; React reconciles against
+       the prerendered DOM.
+    5. Build manifest sync. The worker needs the client manifest at boot.
+       In dev, restarts re-run buildClient — the worker boot follows that,
+       so the simplest wiring is to spawn the worker AFTER the build.
+    6. Error path. Worker timeout / throw must fall back to today's
+       shell-only response. SSR failures must not 500 the page.
+
+  Subtle gotchas to expect:
+
+    - Streaming order. renderToReadableStream emits HTML chunks as
+      Suspense boundaries resolve. The worker has to start sending HTML
+      while it's still reading RSC. Backpressure matters; a naive
+      readAll-then-send pattern serializes the streams and erases most
+      of the FCP win.
+    - Webpack/chunk shims, again. rsdw/client.edge calls
+      __webpack_require__ and friends just like server-fn.ts already
+      handles for server references — but in the worker context, mapped
+      to the BROWSER bundle URLs (so React can SSR client components by
+      requiring their built code). The worker needs its own version of
+      installServerWebpackShims keyed off the client manifest.
+    - Two manifests. The main process needs the client manifest for the
+      RSC pass (already wired). The worker needs the same data for the
+      SSR pass. Same source, two consumers — pass it explicitly.
+    - --conditions react-server propagation. Worker threads in Bun
+      inherit the parent's resolution conditions by default. Spawn the
+      worker with smol or with explicit conditions overrides so its
+      `react-dom/server` resolves to the regular build, not the stub.
+      Verify empirically — Bun's docs are thin here.
+
+  Sizing: a few hundred lines of new code, several days of debugging
+  streams + module resolution. Land it on its own branch; keep PRs from
+  bundling it with unrelated work.
 
 ────────────────────────────────────────────────────────────────────────────
 2) Client-side navigation — DONE
