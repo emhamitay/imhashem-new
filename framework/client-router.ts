@@ -1,15 +1,15 @@
 /*
 Browser-side router for soft navigation.
 
-Holds a single React state setter (registered by the bootstrap on mount) that
-swaps the root rscPromise. `<Link>` and `popstate` both go through navigate()
-to refresh that promise after fetching a new RSC payload from the server.
+The setRoot setter lives in framework/rsc/call-server.ts (since both
+navigation and Server Function calls need it). We import it here rather
+than maintaining a parallel singleton — one source of truth for "swap the
+React tree".
 
 This module is NOT marked "use client" because it isn't a component module
 and it's never imported on the server — only the bootstrap and Link.tsx
-(both browser-only) reach it. Bun.build with splitting:true hoists it into a
-shared chunk so both entry points see the same module instance, which is
-load-bearing: registerSetRoot writes the same variable navigate reads.
+(both browser-only) reach it. Bun.build with splitting:true hoists it into
+a shared chunk so both entry points see the same module instance.
 
 Params handling: route params live in `window.__PARAMS__` (the HTML shell
 inlines them on first load; `useParams` reads from there). Soft-nav responses
@@ -18,19 +18,16 @@ before the new tree renders. We resolve fetch headers (which arrive before
 the body) inside a then() chained into createFromFetch's Response promise —
 that guarantees __PARAMS__ is updated before any client component in the new
 tree reads it.
+
+callServer is plumbed into createFromFetch so server references that come
+back inside the navigation payload (functions passed as props) are callable.
 */
 
 import { createFromFetch } from "react-server-dom-webpack/client.browser";
 import type { ReactNode } from "react";
+import { callServer, getSetRoot } from "./rsc/call-server.ts";
 
-type SetRoot = (next: Promise<ReactNode>) => void;
-
-let setRoot: SetRoot | null = null;
 let routerInitialized = false;
-
-export function registerSetRoot(fn: SetRoot): void {
-  setRoot = fn;
-}
 
 function fetchRsc(href: string): Promise<ReactNode> {
   const responsePromise = fetch(href, {
@@ -46,10 +43,11 @@ function fetchRsc(href: string): Promise<ReactNode> {
     }
     return res;
   });
-  return createFromFetch<ReactNode>(responsePromise);
+  return createFromFetch<ReactNode>(responsePromise, { callServer });
 }
 
 export function navigate(href: string): void {
+  const setRoot = getSetRoot();
   if (!setRoot) return;
   setRoot(fetchRsc(href));
   history.pushState(null, "", href);
@@ -59,6 +57,7 @@ export function initClientRouter(): void {
   if (routerInitialized) return;
   routerInitialized = true;
   window.addEventListener("popstate", () => {
+    const setRoot = getSetRoot();
     if (!setRoot) return;
     setRoot(fetchRsc(location.pathname + location.search));
   });
