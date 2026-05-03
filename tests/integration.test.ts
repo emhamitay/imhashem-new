@@ -255,23 +255,31 @@ describe("Server Functions", () => {
     // Find the actions.ts chunk in the build outputs by walking what the home
     // page's RSC payload references and what the bootstrap imports. The stub
     // must contain createServerReference and must NOT contain the action body.
+    //
+    // Bun.build code-splits the per-entry stub (a few createServerReference
+    // calls) into a shared chunk, so the entry file `app/actions.js` is just
+    // a re-export shim. The actual stub body lives in one of the chunks the
+    // entry imports — so for every candidate we also follow its imports one
+    // level down.
     const home = await (await fetch(`${baseUrl}/`)).text();
     const bootstrapMatch = home.match(/<script type="module" src="(\/__bunframe\/client\/[^"]+)"/);
     const bootstrap = await (await fetch(`${baseUrl}${bootstrapMatch![1]}`)).text();
     const chunkRels = [...bootstrap.matchAll(/from ?"([./][^"]+)"/g)].map((m) => m[1]!);
-    // Also probe the directly-served entry-point output for actions.ts.
-    const candidates = new Set<string>();
+    const seeds = new Set<string>();
     for (const rel of chunkRels) {
       const url = new URL(rel, `http://x${bootstrapMatch![1]!}`).pathname;
-      candidates.add(url);
+      seeds.add(url);
     }
-    candidates.add("/__bunframe/client/app/actions.js");
+    seeds.add("/__bunframe/client/app/actions.js");
 
+    const visited = new Set<string>();
     let stubFound = false;
     let leaked = false;
-    for (const url of candidates) {
+    async function inspect(url: string): Promise<void> {
+      if (visited.has(url)) return;
+      visited.add(url);
       const r = await fetch(`${baseUrl}${url}`);
-      if (!r.ok) continue;
+      if (!r.ok) return;
       const code = await r.text();
       if (
         code.includes("createServerReference") &&
@@ -282,7 +290,19 @@ describe("Server Functions", () => {
       // Real action body (the in-process counter `let counter = 0`) must not
       // leak into the browser bundle.
       if (/let\s+counter\s*=\s*0/.test(code)) leaked = true;
+      // Follow this file's static imports one level so we cover chunks that
+      // hold the actual stub body even when the entry is just a re-export.
+      const childRels = [
+        ...code.matchAll(/from ?"([./][^"]+)"/g),
+        ...code.matchAll(/import ?"([./][^"]+)"/g),
+      ].map((m) => m[1]!);
+      for (const rel of childRels) {
+        const child = new URL(rel, `http://x${url}`).pathname;
+        await inspect(child);
+      }
     }
+    for (const url of seeds) await inspect(url);
+
     expect(stubFound).toBe(true);
     expect(leaked).toBe(false);
   });
