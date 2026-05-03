@@ -15,18 +15,31 @@ app/                       file-routed pages (Server Components by default)
 components/                shared components ("use client" allowed)
 framework/
   router.ts                glob app/, render RSC payload, embed in HTML shell
-                           (or return raw RSC on Accept: text/x-component)
+                           (or return raw RSC on Accept: text/x-component);
+                           also handles POST for Server Function dispatch
   hooks.ts                 useParams (client-only)
+  context.ts               request-scoped context (params, etc.)
   Link.tsx                 client component for soft navigation
   client-router.ts         browser-side navigate() + popstate handler
+                           (uses the shared setRoot from rsc/call-server.ts)
   rsc/
     directives.ts          ECMAScript directive-prologue scanner
-    plugin.ts              Bun runtime plugin: stubs "use client", JSX shim
-    scan.ts                pre-scan source tree for "use client" files
-    build-client.ts        Bun.build for the browser bundle + manifest
+    plugin.ts              Bun runtime plugin: stubs "use client", appends
+                           registerServerReference to "use server" modules
+    scan.ts                pre-scan source tree for "use client" /
+                           "use server" files
+    build-client.ts        Bun.build for the browser bundle + manifests
+                           (client refs + "use server" stubs)
     manifest.ts            shared client-manifest state + stub generator
+    server-fn.ts           Server Function id helpers, server-reference
+                           manifest, browser stubs, server-side wrapper
+                           appendix, globalThis __webpack_* shims
+    call-server.ts         browser-only callServer singleton + the React
+                           setRoot used by both navigation and action
+                           auto-rerender
 client.ts                  browser bootstrap (createFromReadableStream + createRoot)
-server.ts                  boot order: plugin → scan → build → serve
+server.ts                  boot order: plugin → webpack shims → scan →
+                           build → serve
 tests/                     integration tests
 note.txt                   design decisions + what's deferred + why
 ```
@@ -35,7 +48,7 @@ note.txt                   design decisions + what's deferred + why
 
 ```
 bun run dev          # NODE_ENV=development bun --conditions react-server --watch server.ts
-bun test             # 33 cases (unit + integration) — must stay green
+bun test             # 40 cases (unit + integration) — must stay green
 ```
 
 The `--conditions react-server` flag is mandatory: under it React resolves to
@@ -58,16 +71,25 @@ its server-only build.
 
 `note.txt` has the full reasoning. Short version, in the order I'd tackle:
 
-1. **`"use server"` / Server Functions** — directive scanner already
-   detects it, plugin has the branch reserved. Need: client-side fetch
-   stub generation, `/__fn/:id` route handler, registry. Sketch in note.txt §3.
+1. **Inline `"use server"` closures** — module-level Server Functions ship,
+   but inline closures (`function() { "use server"; ... }` inside a server
+   component) don't. Needs an AST pass for free-variable lifting + AES-GCM
+   encryption of $$bound args (privilege-escalation hole otherwise).
+   Full sketch in note.txt §7. Non-negotiable: crypto must land with it.
 2. **HTML SSR pre-render (Pass 2)** — needs a worker thread or subprocess
-   running React WITHOUT `--conditions react-server`. Biggest lift, mostly
-   improves first-contentful-paint. Sketch in note.txt §1.
-3. **RSC HMR** — quality-of-life. Lowest priority. Sketch in note.txt §4.
+   running React WITHOUT `--conditions react-server`. Biggest user-visible
+   win (FCP). Sketch in note.txt §1.
+3. **RSC HMR** — quality-of-life. Sketch in note.txt §4.
+4. **Other gaps** — revalidation primitives, metadata API, end-to-end
+   no-JS `useActionState` test. See note.txt §8.
 
-Done: client-side navigation (note.txt §2). `<Link>` from `framework/Link.tsx`
-for opt-in soft-nav; server returns raw RSC on `Accept: text/x-component`.
+Done:
+  - Client-side navigation (note.txt §2). `<Link>` for opt-in soft-nav;
+    server returns raw RSC on `Accept: text/x-component`.
+  - Module-level Server Functions (note.txt §3). Every export of a
+    "use server" file is callable from client components, works as
+    `<form action>`, integrates with `useActionState`. POST to the page
+    route dispatches actions and re-renders in the same response.
 
 ## Two Bun-specific gotchas already encountered
 
