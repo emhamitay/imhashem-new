@@ -367,7 +367,13 @@ Honest list, roughly priority order:
   - Inline "use server" (§7) — Next.js parity.
   - Revalidation primitives (revalidatePath / revalidateTag / cache).
   - Metadata API (head, title, fonts).
-  - useActionState progressive-enhancement: we plumb formState through but
-    haven't end-to-end tested a no-JS submit with state preservation. The
-    JS path works; the no-JS path needs an integration test before it can
-    be claimed.
+  - useActionState progressive-enhancement: the no-JS dispatch path
+    ($ACTION_ID_* multipart POST → decodeAction → action runs → HTML
+    response with re-rendered route) is now covered by integration test
+    "no-JS form submit: $ACTION_ID_* multipart POST runs the action and
+    returns HTML". What's still untested end-to-end is the formState
+    round-trip — $ACTION_REF_* + $ACTION_KEY + bound args. That path
+    needs a real <form action={fn}> rendered to HTML, which only happens
+    once SSR pre-render lands (§1). Until then we know the server-side
+    plumbing exists (decodeFormState + formState option to
+    renderToReadableStream) but no test exercises a real ref.

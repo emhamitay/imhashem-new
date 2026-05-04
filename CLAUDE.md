@@ -48,7 +48,7 @@ note.txt                   design decisions + what's deferred + why
 
 ```
 bun run dev          # NODE_ENV=development bun --conditions react-server --watch server.ts
-bun test             # 40 cases (unit + integration) — must stay green
+bun test             # 53 cases (unit + integration) — must stay green
 ```
 
 The `--conditions react-server` flag is mandatory: under it React resolves to
@@ -80,8 +80,9 @@ its server-only build.
    running React WITHOUT `--conditions react-server`. Biggest user-visible
    win (FCP). Sketch in note.txt §1.
 3. **RSC HMR** — quality-of-life. Sketch in note.txt §4.
-4. **Other gaps** — revalidation primitives, metadata API, end-to-end
-   no-JS `useActionState` test. See note.txt §8.
+4. **Other gaps** — revalidation primitives, metadata API, full
+   formState round-trip test (the no-JS dispatch path is covered, the
+   $ACTION_REF_* path waits on SSR). See note.txt §8.
 
 Done:
   - Client-side navigation (note.txt §2). `<Link>` for opt-in soft-nav;
@@ -90,6 +91,9 @@ Done:
     "use server" file is callable from client components, works as
     `<form action>`, integrates with `useActionState`. POST to the page
     route dispatches actions and re-renders in the same response.
+  - No-JS form-submit dispatch path covered by integration tests
+    (synthesized `$ACTION_ID_*` multipart POST). Full formState
+    round-trip awaits SSR pre-render — see note.txt §8.
 
 ## Two Bun-specific gotchas already encountered
 
