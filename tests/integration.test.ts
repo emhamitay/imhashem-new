@@ -251,27 +251,90 @@ describe("Server Functions", () => {
     expect(text).toContain("BunFrame");
   });
 
+  test("no-JS form submit: $ACTION_ID_* multipart POST runs the action and returns HTML", async () => {
+    // The no-JS path: a real browser without JS submits a <form action={fn}>,
+    // and React's SSR pre-render injects hidden $ACTION_ID_<n>=<id> inputs
+    // so the server can dispatch the action without a header. We don't have
+    // SSR yet (note.txt §1) so there's no rendered form to submit from — but
+    // the server's dispatch path is independent and worth testing on its own.
+    //
+    // Synthesize the request: multipart/form-data carrying $ACTION_ID_<n> and
+    // a regular form field. rsdw's decodeAction picks up the $ACTION_ID_*
+    // field, looks the function up via the server manifest, and binds
+    // formData as its first arg. We observe the side effect through a
+    // follow-up JS-path call to getLastMessage (the response itself is HTML
+    // and our pages don't render lastSubmittedMessage).
+    //
+    // Full formState round-trip ($ACTION_REF_* + $ACTION_KEY + bound args)
+    // needs SSR to render a real action reference. Deferred until §1 lands.
+    const absPath = join(PROJECT_ROOT, "app", "actions.ts");
+    const id = `${absPath}#submitMessage`;
+
+    // Field-name format that React's no-bound-args path emits — the action id
+    // is the suffix of the key (rsdw client.edge:824), and decodeAction reads
+    // it via key.slice(11). The field value itself is ignored.
+    const fd = new FormData();
+    fd.append(`$ACTION_ID_${id}`, "");
+    fd.append("message", "hello-no-js");
+
+    const res = await fetch(`${baseUrl}/`, { method: "POST", body: fd });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/html/);
+    const html = await res.text();
+    // Server returned the full HTML shell with a freshly-rendered route, not
+    // a flight stream — the no-JS path swap.
+    expect(html).toContain('id="__BUNFRAME_RSC__"');
+    expect(html).toContain("BunFrame");
+
+    // Side effect: subsequent JS-path call to getLastMessage observes the
+    // value the no-JS submit wrote.
+    const { encodeReply } = await import("react-server-dom-webpack/client.edge");
+    const args = await encodeReply([]);
+    const getId = `${absPath}#getLastMessage`;
+    const r2 = await fetch(`${baseUrl}/`, {
+      method: "POST",
+      headers: {
+        Accept: "text/x-component",
+        "X-Bunframe-Action-Id": encodeURIComponent(getId),
+        "Content-Type":
+          typeof args === "string" ? "text/plain;charset=utf-8" : "multipart/form-data",
+      },
+      body: args as BodyInit,
+    });
+    expect(r2.status).toBe(200);
+    const flight = await r2.text();
+    expect(flight).toContain("hello-no-js");
+  });
+
   test("server-fn module is bundled as a stub in the browser graph", async () => {
     // Find the actions.ts chunk in the build outputs by walking what the home
     // page's RSC payload references and what the bootstrap imports. The stub
     // must contain createServerReference and must NOT contain the action body.
+    //
+    // Bun.build code-splits the per-entry stub (a few createServerReference
+    // calls) into a shared chunk, so the entry file `app/actions.js` is just
+    // a re-export shim. The actual stub body lives in one of the chunks the
+    // entry imports — so for every candidate we also follow its imports one
+    // level down.
     const home = await (await fetch(`${baseUrl}/`)).text();
     const bootstrapMatch = home.match(/<script type="module" src="(\/__bunframe\/client\/[^"]+)"/);
     const bootstrap = await (await fetch(`${baseUrl}${bootstrapMatch![1]}`)).text();
     const chunkRels = [...bootstrap.matchAll(/from ?"([./][^"]+)"/g)].map((m) => m[1]!);
-    // Also probe the directly-served entry-point output for actions.ts.
-    const candidates = new Set<string>();
+    const seeds = new Set<string>();
     for (const rel of chunkRels) {
       const url = new URL(rel, `http://x${bootstrapMatch![1]!}`).pathname;
-      candidates.add(url);
+      seeds.add(url);
     }
-    candidates.add("/__bunframe/client/app/actions.js");
+    seeds.add("/__bunframe/client/app/actions.js");
 
+    const visited = new Set<string>();
     let stubFound = false;
     let leaked = false;
-    for (const url of candidates) {
+    async function inspect(url: string): Promise<void> {
+      if (visited.has(url)) return;
+      visited.add(url);
       const r = await fetch(`${baseUrl}${url}`);
-      if (!r.ok) continue;
+      if (!r.ok) return;
       const code = await r.text();
       if (
         code.includes("createServerReference") &&
@@ -282,7 +345,19 @@ describe("Server Functions", () => {
       // Real action body (the in-process counter `let counter = 0`) must not
       // leak into the browser bundle.
       if (/let\s+counter\s*=\s*0/.test(code)) leaked = true;
+      // Follow this file's static imports one level so we cover chunks that
+      // hold the actual stub body even when the entry is just a re-export.
+      const childRels = [
+        ...code.matchAll(/from ?"([./][^"]+)"/g),
+        ...code.matchAll(/import ?"([./][^"]+)"/g),
+      ].map((m) => m[1]!);
+      for (const rel of childRels) {
+        const child = new URL(rel, `http://x${url}`).pathname;
+        await inspect(child);
+      }
     }
+    for (const url of seeds) await inspect(url);
+
     expect(stubFound).toBe(true);
     expect(leaked).toBe(false);
   });
