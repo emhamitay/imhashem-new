@@ -94,6 +94,33 @@ function buildSsrModuleMap(): Record<string, Record<string, { id: string; chunks
   return map;
 }
 
+// Build urlToSourcePath: browser chunk URL → absolute source path.
+// Sent to the SSR worker so it can import real client components.
+const urlToSourcePath: Record<string, string> = {};
+for (const [absPath, entry] of Object.entries(getManifest())) {
+  urlToSourcePath[entry.id] = absPath;
+}
+
+if (ssrUrl) {
+  try {
+    const initRes = await fetch(`${ssrUrl}/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(urlToSourcePath),
+    });
+    if (initRes.ok) {
+      console.log(`[BunFrame] SSR worker initialized with ${Object.keys(urlToSourcePath).length} client module(s)`);
+    }
+  } catch (e) {
+    console.warn("[BunFrame] SSR worker init failed:", e);
+  }
+}
+
+// Kill the SSR subprocess when the main process exits.
+process.on("exit", () => ssrProc.kill());
+process.on("SIGTERM", () => { ssrProc.kill(); process.exit(0); });
+process.on("SIGINT", () => { ssrProc.kill(); process.exit(0); });
+
 setRouterConfig({ bootstrapUrl, ssrUrl, ssrModuleMap });
 
 const pageRoutes = await createRoutes();
