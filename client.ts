@@ -5,9 +5,10 @@ Read the inline RSC payload embedded by the server, hand it to React's
 react-server-dom-webpack/client.browser to deserialize back into a React
 element tree, and mount it into #root.
 
-We're not pre-rendering HTML on the server (see note.txt), so we use
-createRoot rather than hydrateRoot — there's nothing to hydrate, just an
-empty <div id="root">.
+When the server pre-rendered HTML into #root (SSR pass), we call hydrateRoot
+so React reconciles against the existing DOM rather than replacing it.
+When there is no prerendered content (SSR unavailable / fallback), we call
+createRoot for a clean client-side mount.
 
 The current rscPromise lives in React state on Root so the client router AND
 the Server Function dispatcher can swap it. registerSetRoot writes the setter
@@ -21,7 +22,7 @@ too late: with code-splitting, rsdw is lifted into a shared chunk that
 evaluates before this entry's body runs.
 */
 
-import { createRoot } from "react-dom/client";
+import { createRoot, hydrateRoot } from "react-dom/client";
 import { createFromReadableStream } from "react-server-dom-webpack/client.browser";
 import { use, useEffect, useState, type ReactNode } from "react";
 import { createElement } from "react";
@@ -65,4 +66,11 @@ function Root(): ReactNode {
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("[RSC] #root not found");
-createRoot(rootEl).render(createElement(Root));
+
+const rootElement = createElement(Root);
+if (rootEl.hasChildNodes()) {
+  // SSR pre-rendered content is present — hydrate instead of full mount.
+  hydrateRoot(rootEl, rootElement);
+} else {
+  createRoot(rootEl).render(rootElement);
+}

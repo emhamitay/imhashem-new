@@ -11,11 +11,18 @@ type RouteEntry = { GET: RouteHandler; POST: RouteHandler };
 
 export type RouterConfig = {
   bootstrapUrl: string;
+  ssrUrl?: string;
+  ssrModuleMap?: Record<string, Record<string, { id: string; chunks: string[]; name: string }>>;
 };
 
 let bootstrapUrl = "";
+let ssrUrl: string | undefined;
+let ssrModuleMap: Record<string, Record<string, { id: string; chunks: string[]; name: string }>> | undefined;
+
 export function setRouterConfig(cfg: RouterConfig): void {
   bootstrapUrl = cfg.bootstrapUrl;
+  ssrUrl = cfg.ssrUrl;
+  ssrModuleMap = cfg.ssrModuleMap;
 }
 
 /*
@@ -120,7 +127,11 @@ predates chunk evaluation.
 */
 const WEBPACK_SHIMS_INLINE = `(()=>{const c=new Map;window.__webpack_chunk_load__=async i=>{if(c.has(i))return;c.set(i,await import(i))};window.__webpack_require__=i=>{const m=c.get(i);if(m===undefined)throw new Error("[RSC] module not loaded yet: "+i);return m};window.__webpack_get_script_filename__=i=>i;})();`;
 
-function htmlShell(rscPayload: string, params: Record<string, string>): string {
+function htmlShell(
+  rscPayload: string,
+  params: Record<string, string>,
+  ssrHtml: string = "",
+): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -129,7 +140,7 @@ function htmlShell(rscPayload: string, params: Record<string, string>): string {
 <title>BunFrame</title>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">${ssrHtml}</div>
 <script type="text/x-component" id="__BUNFRAME_RSC__">${escapeScriptText(rscPayload)}</script>
 <script>window.__PARAMS__=${JSON.stringify(params)};${WEBPACK_SHIMS_INLINE}</script>
 <script type="module" src="${bootstrapUrl}"></script>
@@ -177,8 +188,35 @@ function readActionId(req: Request): string | null {
 }
 
 /*
+Send the RSC stream to the SSR subprocess and return the prerendered HTML
+string, or null if SSR is unavailable or fails. Failure is non-fatal: the
+caller falls back to an empty <div id="root">.
+*/
+async function renderSSR(rscStream: ReadableStream<Uint8Array>): Promise<string | null> {
+  if (!ssrUrl || !ssrModuleMap) return null;
+  try {
+    const res = await fetch(ssrUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-SSR-Manifest": JSON.stringify(ssrModuleMap),
+      },
+      body: rscStream,
+    });
+    return res.ok ? res.text() : null;
+  } catch {
+    return null;
+  }
+}
+
+/*
 GET handler. Renders the route to RSC, then returns either the raw stream
 (soft-nav) or an HTML shell with the payload embedded (initial load).
+
+For initial HTML loads, we tee() the RSC stream: one branch is collected as
+the inline payload string; the other is streamed to the SSR subprocess which
+renders server components to HTML. Both run concurrently. If SSR fails the
+response falls back to an empty <div id="root">.
 */
 function makeGetHandler(normalizedFile: string): RouteHandler {
   return async (req) => {
@@ -196,8 +234,13 @@ function makeGetHandler(normalizedFile: string): RouteHandler {
       });
     }
 
-    const rscPayload = await streamToString(rscStream);
-    const html = htmlShell(rscPayload, params);
+    const [rscForPayload, rscForSSR] = rscStream.tee();
+    const [rscPayload, ssrHtml] = await Promise.all([
+      streamToString(rscForPayload),
+      renderSSR(rscForSSR),
+    ]);
+
+    const html = htmlShell(rscPayload, params, ssrHtml ?? "");
     return new Response(html, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });

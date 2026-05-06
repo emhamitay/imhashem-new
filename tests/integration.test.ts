@@ -136,6 +136,23 @@ describe("server end-to-end", () => {
     expect(res.status).toBe(404);
   });
 
+  test("SSR: #root contains prerendered server-component HTML", async () => {
+    const res = await fetch(`${baseUrl}/`);
+    const html = await res.text();
+    // #root must open with content, not immediately close. React's streaming
+    // SSR wraps content in <!--$--> Suspense markers, so we look for those.
+    expect(html).toMatch(/<div id="root">(?!<\/div>)/);
+    // Server component text (rendered before any JS runs) is present.
+    expect(html).toContain("BunFrame");
+  });
+
+  test("SSR: login page #root contains prerendered content", async () => {
+    const res = await fetch(`${baseUrl}/login`);
+    const html = await res.text();
+    expect(html).toMatch(/<div id="root">(?!<\/div>)/);
+    expect(html).toContain("Welcome to the Login Page");
+  });
+
   test("Accept: text/x-component returns raw RSC payload, not HTML", async () => {
     const res = await fetch(`${baseUrl}/login`, {
       headers: { Accept: "text/x-component" },
