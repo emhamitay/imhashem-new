@@ -5,6 +5,7 @@ import { scanForClientModules } from "./framework/rsc/scan.ts";
 import { buildClient, publicPathToDisk, CLIENT_PUBLIC_PREFIX } from "./framework/rsc/build-client.ts";
 import { createRoutes, setRouterConfig } from "./framework/router.ts";
 import { installServerWebpackShims } from "./framework/rsc/server-fn.ts";
+import { getManifest } from "./framework/rsc/manifest.ts";
 
 const isDev = process.env.NODE_ENV === "development";
 const projectRoot = import.meta.dir;
@@ -45,7 +46,82 @@ const { bootstrapUrl } = await buildClient({
 });
 console.log(`[BunFrame] Client bootstrap: ${bootstrapUrl}`);
 
-setRouterConfig({ bootstrapUrl });
+// Spawn the SSR subprocess. It runs WITHOUT --conditions react-server so
+// react-dom/server resolves to the real implementation. It signals its port
+// on stdout; we wait up to 10 s. On failure we continue without SSR.
+const ssrWorkerPath = join(projectRoot, "framework", "ssr-worker.ts");
+const ssrProc = Bun.spawn({
+  cmd: ["bun", ssrWorkerPath],
+  cwd: projectRoot,
+  env: { ...process.env },
+  stdout: "pipe",
+  stderr: "inherit",
+});
+
+async function readSsrPort(proc: Bun.Subprocess, timeoutMs = 10_000): Promise<number | null> {
+  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + timeoutMs;
+  let buf = "";
+  try {
+    while (Date.now() < deadline) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const m = buf.match(/SSR_PORT=(\d+)/);
+      if (m) { reader.releaseLock(); return Number(m[1]); }
+    }
+  } catch {
+    // fall through
+  }
+  reader.releaseLock();
+  return null;
+}
+
+const ssrPort = await readSsrPort(ssrProc);
+const ssrUrl = ssrPort ? `http://127.0.0.1:${ssrPort}` : undefined;
+if (ssrUrl) console.log(`[BunFrame] SSR worker: ${ssrUrl}`);
+else console.warn("[BunFrame] SSR worker failed to start — falling back to client-only rendering");
+
+// Build the SSR module map once: maps browser chunk URL → wildcard entry so
+// createFromReadableStream in the SSR subprocess can resolve client references.
+const ssrModuleMap = buildSsrModuleMap();
+function buildSsrModuleMap(): Record<string, Record<string, { id: string; chunks: string[]; name: string }>> {
+  const map: Record<string, Record<string, { id: string; chunks: string[]; name: string }>> = {};
+  for (const entry of Object.values(getManifest())) {
+    map[entry.id] = { "*": { id: entry.id, chunks: entry.chunks, name: entry.name } };
+  }
+  return map;
+}
+
+// Build urlToSourcePath: browser chunk URL → absolute source path.
+// Sent to the SSR worker so it can import real client components.
+const urlToSourcePath: Record<string, string> = {};
+for (const [absPath, entry] of Object.entries(getManifest())) {
+  urlToSourcePath[entry.id] = absPath;
+}
+
+if (ssrUrl) {
+  try {
+    const initRes = await fetch(`${ssrUrl}/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(urlToSourcePath),
+    });
+    if (initRes.ok) {
+      console.log(`[BunFrame] SSR worker initialized with ${Object.keys(urlToSourcePath).length} client module(s)`);
+    }
+  } catch (e) {
+    console.warn("[BunFrame] SSR worker init failed:", e);
+  }
+}
+
+// Kill the SSR subprocess when the main process exits.
+process.on("exit", () => ssrProc.kill());
+process.on("SIGTERM", () => { ssrProc.kill(); process.exit(0); });
+process.on("SIGINT", () => { ssrProc.kill(); process.exit(0); });
+
+setRouterConfig({ bootstrapUrl, ssrUrl, ssrModuleMap });
 
 const pageRoutes = await createRoutes();
 

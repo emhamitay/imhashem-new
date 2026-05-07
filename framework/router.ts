@@ -11,11 +11,18 @@ type RouteEntry = { GET: RouteHandler; POST: RouteHandler };
 
 export type RouterConfig = {
   bootstrapUrl: string;
+  ssrUrl?: string;
+  ssrModuleMap?: Record<string, Record<string, { id: string; chunks: string[]; name: string }>>;
 };
 
 let bootstrapUrl = "";
+let ssrUrl: string | undefined;
+let ssrModuleMap: Record<string, Record<string, { id: string; chunks: string[]; name: string }>> | undefined;
+
 export function setRouterConfig(cfg: RouterConfig): void {
   bootstrapUrl = cfg.bootstrapUrl;
+  ssrUrl = cfg.ssrUrl;
+  ssrModuleMap = cfg.ssrModuleMap;
 }
 
 /*
@@ -120,22 +127,6 @@ predates chunk evaluation.
 */
 const WEBPACK_SHIMS_INLINE = `(()=>{const c=new Map;window.__webpack_chunk_load__=async i=>{if(c.has(i))return;c.set(i,await import(i))};window.__webpack_require__=i=>{const m=c.get(i);if(m===undefined)throw new Error("[RSC] module not loaded yet: "+i);return m};window.__webpack_get_script_filename__=i=>i;})();`;
 
-function htmlShell(rscPayload: string, params: Record<string, string>): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>BunFrame</title>
-</head>
-<body>
-<div id="root"></div>
-<script type="text/x-component" id="__BUNFRAME_RSC__">${escapeScriptText(rscPayload)}</script>
-<script>window.__PARAMS__=${JSON.stringify(params)};${WEBPACK_SHIMS_INLINE}</script>
-<script type="module" src="${bootstrapUrl}"></script>
-</body>
-</html>`;
-}
 
 async function streamToString(stream: ReadableStream<Uint8Array>): Promise<string> {
   const reader = stream.getReader();
@@ -177,8 +168,87 @@ function readActionId(req: Request): string | null {
 }
 
 /*
+Send the RSC payload bytes to the SSR subprocess and return the prerendered
+HTML as a ReadableStream, or null if SSR is unavailable or fails.
+
+We take the already-collected RSC payload string (not a stream) to avoid a
+Bun tee() + streaming-fetch-body race: tee'd branches of a sync RSC stream
+can deliver an AbortError to the SSR worker before all bytes are consumed.
+Buffering the payload first is safe — streamToString already ran before we
+get here.
+*/
+async function fetchSSRStream(
+  rscPayload: string,
+): Promise<ReadableStream<Uint8Array> | null> {
+  if (!ssrUrl || !ssrModuleMap) return null;
+  try {
+    const res = await fetch(ssrUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-SSR-Manifest": JSON.stringify(ssrModuleMap),
+      },
+      body: enc.encode(rscPayload),
+    });
+    return res.ok && res.body ? res.body : null;
+  } catch {
+    return null;
+  }
+}
+
+const enc = new TextEncoder();
+
+/*
+Build a streaming HTML response. Emits head + <div id="root"> immediately
+(low TTFB), awaits the RSC payload, sends it to the SSR worker, pipes the
+SSR HTML stream into root, then closes the tag and appends the RSC payload
+script + footer.
+*/
+function buildHtmlStream(
+  params: Record<string, string>,
+  rscPayloadPromise: Promise<string>,
+): ReadableStream<Uint8Array> {
+  const head =
+    `<!DOCTYPE html>\n<html lang="en">\n<head>\n` +
+    `<meta charset="UTF-8" />\n` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1.0" />\n` +
+    `<title>BunFrame</title>\n` +
+    `</head>\n<body>\n<div id="root">`;
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(enc.encode(head));
+
+      const rscPayload = await rscPayloadPromise;
+      const ssrStream = await fetchSSRStream(rscPayload);
+      if (ssrStream) {
+        const reader = ssrStream.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+      }
+
+      const footer =
+        `</div>\n` +
+        `<script type="text/x-component" id="__BUNFRAME_RSC__">${escapeScriptText(rscPayload)}</script>\n` +
+        `<script>window.__PARAMS__=${JSON.stringify(params)};${WEBPACK_SHIMS_INLINE}</script>\n` +
+        `<script type="module" src="${bootstrapUrl}"></script>\n` +
+        `</body>\n</html>`;
+      controller.enqueue(enc.encode(footer));
+      controller.close();
+    },
+  });
+}
+
+/*
 GET handler. Renders the route to RSC, then returns either the raw stream
 (soft-nav) or an HTML shell with the payload embedded (initial load).
+
+For initial HTML loads, we tee() the RSC stream: one branch is collected as
+the inline payload string; the other is streamed to the SSR subprocess which
+renders server components to HTML. Both run concurrently. If SSR fails the
+response falls back to an empty <div id="root">.
 */
 function makeGetHandler(normalizedFile: string): RouteHandler {
   return async (req) => {
@@ -196,9 +266,9 @@ function makeGetHandler(normalizedFile: string): RouteHandler {
       });
     }
 
-    const rscPayload = await streamToString(rscStream);
-    const html = htmlShell(rscPayload, params);
-    return new Response(html, {
+    const rscPayloadPromise = streamToString(rscStream);
+    const htmlStream = buildHtmlStream(params, rscPayloadPromise);
+    return new Response(htmlStream, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   };
@@ -289,9 +359,9 @@ function makePostHandler(normalizedFile: string): RouteHandler {
     // up on the next render.
     const renderOpts = formState != null ? { formState } : undefined;
     const rscStream = renderToReadableStream(tree, getManifest(), renderOpts);
-    const rscPayload = await streamToString(rscStream);
-    const html = htmlShell(rscPayload, params);
-    return new Response(html, {
+    const rscPayloadPromise = streamToString(rscStream);
+    const htmlStream = buildHtmlStream(params, rscPayloadPromise);
+    return new Response(htmlStream, {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   };
